@@ -1,0 +1,50 @@
+[project]
+name = "dreamer4-pytorch"
+version = "0.1.0"
+description = "Minimal PyTorch Lightning implementation of Dreamer 4"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "einops>=0.8.0",
+    "imageio>=2.37.0",
+    "lightning>=2.4.0",
+    "numpy>=1.26.0",
+    "omegaconf>=2.3.0",
+    "torch>=2.4.0",
+    "torchvision>=0.19.0",
+]
+
+[project.optional-dependencies]
+data = ["granular"]
+dev = ["ruff>=0.8.0"]
+log = ["wandb>=0.18.0"]
+
+[dependency-groups]
+dev = ["ruff>=0.8.0"]
+
+[project.scripts]
+dreamer4-train = "dreamer4.cli:main"
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dreamer4*"]
+
+[tool.uv]
+default-groups = []
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
