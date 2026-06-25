@@ -4,6 +4,59 @@ Minimal PyTorch Lightning reimplementation of [Dreamer 4](https://arxiv.org/abs/
 
 References: [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4), [edwhu/dreamer4-jax](https://github.com/edwhu/dreamer4-jax).
 
+## TODO
+
+### Transformer (vs paper §architecture)
+
+Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft capping*.
+
+| Component | Paper | This repo | Location |
+|-----------|-------|-----------|----------|
+| Pre-layer RMSNorm | ✓ | ✓ | `models/transformer_blocks.py` — `norm1/2/3` before space/time attn & MLP |
+| SwiGLU FFN | ✓ | ✓ | `MLP`: `u * silu(v)` gated FFN |
+| RoPE | ✓ | ✗ | Uses additive sinusoidal positions on token embeddings (`add_sinusoidal_positions`), not rotary Q/K |
+| QKNorm | ✓ | ✗ | `MultiheadSelfAttention` — no norm on Q/K heads |
+| Attention logit soft capping | ✓ | ✗ | Standard `scaled_dot_product_attention`, no logit cap |
+
+- [ ] **RoPE** — apply rotary embeddings to Q/K in space & time attention (replace or pair with current sinusoidal token bias)
+- [ ] **QKNorm** — RMSNorm (or equivalent) on Q and K per head before dot product
+- [ ] **Attention logit soft capping** — e.g. `softcap * tanh(logits / softcap)` before softmax (tune cap hyperparameter)
+
+### Tokenizer
+
+- [x] Block-causal MAE encoder–decoder
+- [x] Train / val loop, step-based eval, reconstruction viz, wandb
+- [x] Optional LPIPS loss (`train.use_lpips`, `tokenizer_w_lpips.yaml`)
+- [x] Multi-GPU DDP
+- [ ] Resume from Lightning checkpoint (`train.resume_ckpt`)
+- [ ] Standalone tokenizer eval script (recon metrics + panels from checkpoint)
+- [ ] Ablation: `scale_pos_embeds` off (paper notes it can help)
+
+### Dynamics (stage 2)
+
+- [ ] `DynamicsModel` — interactive dynamics + shortcut forcing (`models/dynamics.py` stub)
+- [ ] `DynamicsModule` training loop (`modules/dynamics.py`)
+- [ ] Config `configs/walker_walk/dynamics.yaml` — wire data, load frozen tokenizer ckpt
+- [ ] Action / proprio tokens in transformer layout (if not image-only)
+
+### BC (stage 3)
+
+- [ ] `AgentHeads` — policy, reward, value heads (`models/policy.py` stub)
+- [ ] `BCModule` training (`modules/bc.py`)
+- [ ] Config `configs/walker_walk/bc.yaml`
+
+### Policy / imagination (stage 4)
+
+- [ ] `imagine_rollout` in latent space (`imagination.py` stub)
+- [ ] `PolicyModule` — imagination RL on top of BC (`modules/policy.py`)
+- [ ] Config `configs/walker_walk/policy.yaml`
+
+### Data & infra
+
+- [ ] `data.obs_mode=proprio` / `both` paths through dynamics & policy (tokenizer is image-only today)
+- [ ] DMC online env integration (`env.py`) for policy eval
+- [ ] Git initial commit & CI smoke test
+
 ## Setup
 
 ```bash
@@ -96,31 +149,39 @@ uv sync --extra data --extra log
 uv run python -c "import torch; print(torch.cuda.device_count())"
 ```
 
-## Project layout
-
-```
-dreamer4/
-  config.py       # YAML config loading (OmegaConf)
-  data.py         # Granular dataset + batch collation
-  models.py       # Tokenizer, dynamics, agent heads
-  imagination.py  # Latent-space rollouts
-  train.py        # Lightning modules + trainer setup
-  cli.py          # Entry point
-configs/walker_walk/
-  tokenizer.yaml
-  dynamics.yaml
-  bc.yaml
-  policy.yaml
-```
-
 ## Observation modes
 
 Set `data.obs_mode` in config:
 
-- `image` — pixels only
+- `image` — pixels only (tokenizer training)
 - `proprio` — proprioception only
 - `both` — image + proprioception
 
-## Status
+## Project layout
 
-Scaffold is in place. Tokenizer training is implemented; dynamics / BC / policy are still stubs.
+```
+dreamer4/
+  config.py           # YAML config (OmegaConf)
+  data.py             # Granular dataset + batch collation
+  models/             # NN modules
+    transformer_blocks.py
+    tokenizer.py
+    dynamics.py
+    policy.py         # AgentHeads
+  modules/            # Lightning modules per stage
+    base.py
+    tokenizer.py
+    dynamics.py
+    bc.py
+    policy.py
+  imagination.py      # Latent rollouts (stub)
+  train.py            # Trainer, callbacks, dataloaders
+  cli.py
+configs/walker_walk/
+  tokenizer.yaml
+  tokenizer_w_lpips.yaml
+  tokenizer_debug.yaml
+  dynamics.yaml
+  bc.yaml
+  policy.yaml
+```

@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from dreamer4.tokenizer import Tokenizer, build_tokenizer
+from dreamer4.models.tokenizer import Tokenizer
 
 
 class DynamicsModel(nn.Module):
@@ -16,14 +16,3 @@ class DynamicsModel(nn.Module):
 
     def forward(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError("DynamicsModel not yet implemented")
-
-
-class AgentHeads(nn.Module):
-    """BC policy, reward, and value heads. Implementation pending."""
-
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-
-    def forward(self, *args, **kwargs):
-        raise NotImplementedError("AgentHeads not yet implemented")

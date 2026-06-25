@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
 
-from dreamer4.transformer_blocks import (
+from dreamer4.models.transformer_blocks import (
     BlockCausalTransformer,
     MAEReplacer,
     Modality,
@@ -249,6 +249,41 @@ def build_tokenizer(cfg: Mapping[str, Any] | DictConfig) -> Tokenizer:
     return model
 
 
+def lpips_on_mae_recon(
+    lpips_fn: nn.Module,
+    pred_btnd: torch.Tensor,
+    target_btnd: torch.Tensor,
+    mae_mask_btNp1: torch.Tensor,
+    *,
+    H: int,
+    W: int,
+    C: int,
+    patch: int,
+    subsample_frac: float = 1.0,
+) -> torch.Tensor:
+    """LPIPS on MAE-masked reconstruction (recon uses pred only on masked patches)."""
+    recon_masked_btnd = torch.where(mae_mask_btNp1, pred_btnd, target_btnd)
+    recon = temporal_unpatchify(recon_masked_btnd.float(), H, W, C, patch)
+    tgt = temporal_unpatchify(target_btnd.float(), H, W, C, patch)
+
+    if subsample_frac < 1.0:
+        step = max(1, int(1.0 / subsample_frac))
+        recon = recon[:, ::step]
+        tgt = tgt[:, ::step]
+
+    recon = (recon.clamp(0, 1) * 2.0 - 1.0).float()
+    tgt = (tgt.clamp(0, 1) * 2.0 - 1.0).float()
+
+    B, T = recon.shape[:2]
+    recon = recon.reshape(B * T, C, H, W)
+    tgt = tgt.reshape(B * T, C, H, W)
+
+    device_type = "cuda" if recon.is_cuda else "cpu"
+    with torch.autocast(device_type=device_type, enabled=False):
+        lp = lpips_fn(recon, tgt)
+    return lp.mean()
+
+
 def images_to_patches(image_bthwc: torch.Tensor, patch_size: int) -> torch.Tensor:
     """(B,T,H,W,C) -> (B,T,C,H,W) -> patch tokens."""
     x = image_bthwc.permute(0, 1, 4, 2, 3).contiguous()
@@ -259,14 +294,37 @@ def tokenizer_forward_loss(
     model: Tokenizer,
     image_bthwc: torch.Tensor,
     patch_size: int,
+    *,
+    lpips_fn: nn.Module | None = None,
+    lpips_weight: float = 0.0,
+    lpips_frac: float = 1.0,
 ) -> Tuple[torch.Tensor, dict[str, float]]:
     patches = images_to_patches(image_bthwc, patch_size)
     pred, mae_mask, _ = model(patches)
-    loss = mae_recon_loss(pred, patches, mae_mask)
+    mse = mae_recon_loss(pred, patches, mae_mask)
     metrics = {
-        "loss_mae": float(loss.detach()),
+        "loss_mae": float(mse.detach()),
         "masked_frac": float(mae_mask.float().mean().detach()),
     }
+
+    if lpips_fn is not None and lpips_weight > 0.0:
+        _, H, W, C = image_bthwc.shape
+        lp = lpips_on_mae_recon(
+            lpips_fn,
+            pred,
+            patches,
+            mae_mask,
+            H=H,
+            W=W,
+            C=C,
+            patch=patch_size,
+            subsample_frac=lpips_frac,
+        )
+        loss = mse + lpips_weight * lp
+        metrics["loss_lpips"] = float(lp.detach())
+    else:
+        loss = mse
+
     return loss, metrics
 
 
@@ -274,16 +332,39 @@ def tokenizer_forward_with_aux(
     model: Tokenizer,
     image_bthwc: torch.Tensor,
     patch_size: int,
+    *,
+    lpips_fn: nn.Module | None = None,
+    lpips_weight: float = 0.0,
+    lpips_frac: float = 1.0,
 ) -> Tuple[torch.Tensor, dict[str, float], torch.Tensor, torch.Tensor, torch.Tensor]:
     """Forward + MAE loss; also returns pred, target patches, and MAE mask for viz."""
     patches = images_to_patches(image_bthwc, patch_size)
     pred, mae_mask, _ = model(patches)
-    loss = mae_recon_loss(pred, patches, mae_mask)
+    mse = mae_recon_loss(pred, patches, mae_mask)
     metrics = {
-        "loss_mae": float(loss.detach()),
+        "loss_mae": float(mse.detach()),
         "loss_full": float(full_recon_loss(pred, patches).detach()),
         "masked_frac": float(mae_mask.float().mean().detach()),
     }
+
+    if lpips_fn is not None and lpips_weight > 0.0:
+        _, H, W, C = image_bthwc.shape
+        lp = lpips_on_mae_recon(
+            lpips_fn,
+            pred,
+            patches,
+            mae_mask,
+            H=H,
+            W=W,
+            C=C,
+            patch=patch_size,
+            subsample_frac=lpips_frac,
+        )
+        loss = mse + lpips_weight * lp
+        metrics["loss_lpips"] = float(lp.detach())
+    else:
+        loss = mse
+
     return loss, metrics, pred, patches, mae_mask
 
 

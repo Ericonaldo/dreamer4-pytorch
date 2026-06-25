@@ -18,6 +18,7 @@ dependencies = [
 data = ["granular"]
 dev = ["ruff>=0.8.0"]
 log = ["wandb>=0.18.0"]
+lpips = ["lpips>=0.1.4"]
 
 [dependency-groups]
 dev = ["ruff>=0.8.0"]

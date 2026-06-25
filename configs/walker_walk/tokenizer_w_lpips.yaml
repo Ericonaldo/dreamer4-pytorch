@@ -32,7 +32,7 @@ train:
   checkpoint_keep_last: 5
   val_every: 500
   val_max_batches: 32
-  use_lpips: false
+  use_lpips: true
   lpips_weight: 0.2
   lpips_frac: 0.5
   lpips_net: alex
@@ -48,7 +48,7 @@ train:
 
 log:
   dir: logs
-  run_name: walker_walk/tokenizer
+  run_name: walker_walk/tokenizer_w_lpips
   every_n_steps: 100
   wandb: true
   project: dreamer4-walker-walk

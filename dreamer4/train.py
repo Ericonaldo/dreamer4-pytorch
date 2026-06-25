@@ -2,188 +2,68 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import imageio.v3 as iio
 import lightning as L
-import torch
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
 from dreamer4.config import save_config
 from dreamer4.data import GranularEpisodeDataset, collate_episodes, split_episode_indices
+from dreamer4.modules import STAGES
 
 
-class BaseModule(L.LightningModule):
-    stage: str = "base"
+class ValidateEveryNSteps(Callback):
+    """Run validation every N optimizer steps (works with DDP and small epoch sizes)."""
 
-    def __init__(self, cfg: DictConfig):
-        super().__init__()
-        self.cfg = cfg
-        self.save_hyperparameters(OmegaConf.to_container(cfg, resolve=True))
+    def __init__(self, every_n_steps: int, limit_batches: int, val_dataloader: DataLoader):
+        self.every_n_steps = every_n_steps
+        self.limit_batches = limit_batches
+        self.val_dataloader = val_dataloader
 
-    def configure_optimizers(self):
-        opt_cfg = self.cfg.train.optimizer
-        optimizer = torch.optim.AdamW(
-            self.parameters(),
-            lr=opt_cfg.lr,
-            betas=tuple(opt_cfg.betas),
-            weight_decay=opt_cfg.weight_decay,
-        )
-        if not opt_cfg.get("use_scheduler", False):
-            return optimizer
-
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=self.cfg.train.max_steps,
-        )
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
-        }
-
-    def _shared_step(self, batch, stage: str) -> torch.Tensor:
-        raise NotImplementedError
-
-    def training_step(self, batch, batch_idx):
-        loss = self._shared_step(batch, "train")
-        self.log(f"{self.stage}/loss", loss, prog_bar=True, sync_dist=True)
-        return loss
-
-
-class TokenizerModule(BaseModule):
-    stage = "tokenizer"
-
-    def __init__(self, cfg: DictConfig):
-        super().__init__(cfg)
-        from dreamer4.tokenizer import build_tokenizer
-
-        self.model = build_tokenizer(cfg.model)
-        self.patch_size = int(cfg.model.patch_size)
-        self._val_viz: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
-
-    def _tokenizer_loss(self, image_bthwc: torch.Tensor):
-        from dreamer4.tokenizer import tokenizer_forward_loss
-
-        return tokenizer_forward_loss(self.model, image_bthwc, self.patch_size)
-
-    def _tokenizer_eval(self, image_bthwc: torch.Tensor):
-        from dreamer4.tokenizer import tokenizer_forward_with_aux
-
-        return tokenizer_forward_with_aux(self.model, image_bthwc, self.patch_size)
-
-    def _shared_step(self, batch, stage: str) -> torch.Tensor:
-        if batch.image is None:
-            raise ValueError("Tokenizer training requires images; set data.obs_mode=image or both")
-
-        if stage == "val":
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
+        step = trainer.global_step
+        if step > 0 and step % self.every_n_steps == 0:
+            pl_module.eval()
             with torch.no_grad():
-                loss, metrics, pred, _, mae_mask = self._tokenizer_eval(batch.image)
-            if self.trainer.is_global_zero:
-                self._val_viz = (batch.image.detach(), pred.detach(), mae_mask.detach())
-            self.log("val/loss", loss, sync_dist=True)
-            for key, value in metrics.items():
-                self.log(f"val/{key}", value, sync_dist=True)
-        else:
-            loss, metrics = self._tokenizer_loss(batch.image)
-            for key, value in metrics.items():
-                prog = key == "loss_mae"
-                self.log(f"{self.stage}/{key}", value, prog_bar=prog, sync_dist=True)
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        return self._shared_step(batch, "val")
-
-    def on_validation_epoch_end(self) -> None:
-        if self._val_viz is None or not self.trainer.is_global_zero:
-            return
-
-        from dreamer4.tokenizer import recon_panel_uint8
-
-        image, pred, mae_mask = self._val_viz
-        self._val_viz = None
-
-        panel = recon_panel_uint8(
-            image,
-            pred,
-            mae_mask,
-            self.patch_size,
-            max_items=int(self.cfg.log.get("viz_max_items", 4)),
-            max_T=int(self.cfg.log.get("viz_max_T", 6)),
-        )
-        step = int(self.trainer.global_step)
-        run_dir = Path(self.cfg.log.dir) / self.cfg.log.run_name
-        viz_dir = run_dir / "viz"
-        viz_dir.mkdir(parents=True, exist_ok=True)
-        viz_path = viz_dir / f"step_{step:08d}.png"
-        iio.imwrite(viz_path, panel)
-
-        caption = "rows=target/masked/recon_masked/recon_full"
-        for logger in self.trainer.loggers:
-            if isinstance(logger, WandbLogger):
-                import wandb
-
-                logger.experiment.log(
-                    {"tokenizer/viz": wandb.Image(panel, caption=caption)},
-                    step=step,
-                )
+                for i, val_batch in enumerate(self.val_dataloader):
+                    if i >= self.limit_batches:
+                        break
+                    val_batch = trainer.strategy.batch_to_device(val_batch)
+                    pl_module.validation_step(val_batch, i)
+            pl_module.on_validation_epoch_end()
+            pl_module.train()
 
 
-class DynamicsModule(BaseModule):
-    stage = "dynamics"
+class KeepLastCheckpoints(Callback):
+    """Keep only the N most recent step checkpoints (ModelCheckpoint needs save_top_k=-1)."""
 
-    def __init__(self, cfg: DictConfig):
-        super().__init__(cfg)
-        from dreamer4.models import DynamicsModel
-        from dreamer4.tokenizer import build_tokenizer
+    def __init__(self, checkpoint_dir: Path, keep_last: int, every_n_steps: int):
+        self.checkpoint_dir = checkpoint_dir
+        self.keep_last = keep_last
+        self.every_n_steps = every_n_steps
 
-        tokenizer = build_tokenizer(cfg.model.tokenizer)
-        if cfg.get("tokenizer_ckpt"):
-            ckpt = torch.load(cfg.tokenizer_ckpt, map_location="cpu", weights_only=False)
-            state = ckpt.get("state_dict", ckpt)
-            tokenizer_state = {
-                k.removeprefix("model."): v for k, v in state.items() if k.startswith("model.")
-            }
-            tokenizer.load_state_dict(tokenizer_state, strict=True)
-        for p in tokenizer.parameters():
-            p.requires_grad = False
-        self.tokenizer = tokenizer
-        self.model = DynamicsModel(cfg.model, tokenizer)
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
+        step = trainer.global_step
+        if self.keep_last > 0 and step > 0 and step % self.every_n_steps == 0:
+            self._prune()
 
-    def _shared_step(self, batch, stage: str) -> torch.Tensor:
-        raise NotImplementedError("Dynamics training not yet implemented")
+    def _prune(self) -> None:
+        ckpts = [p for p in self.checkpoint_dir.glob("*.ckpt") if p.name != "last.ckpt"]
+        ckpts.sort(key=_checkpoint_step)
+        for path in ckpts[:-self.keep_last]:
+            path.unlink(missing_ok=True)
 
 
-class BCModule(BaseModule):
-    stage = "bc"
-
-    def __init__(self, cfg: DictConfig):
-        super().__init__(cfg)
-        from dreamer4.models import AgentHeads
-
-        self.model = AgentHeads(cfg.model)
-
-    def _shared_step(self, batch, stage: str) -> torch.Tensor:
-        raise NotImplementedError("BC training not yet implemented")
-
-
-class PolicyModule(BaseModule):
-    stage = "policy"
-
-    def __init__(self, cfg: DictConfig):
-        super().__init__(cfg)
-        self.imagination_cfg = cfg.imagination
-
-    def _shared_step(self, batch, stage: str) -> torch.Tensor:
-        raise NotImplementedError("Policy training not yet implemented")
-
-
-STAGES = {
-    "tokenizer": TokenizerModule,
-    "dynamics": DynamicsModule,
-    "bc": BCModule,
-    "policy": PolicyModule,
-}
+def _checkpoint_step(path: Path) -> int:
+    stem = path.stem
+    if stem.isdigit():
+        return int(stem)
+    if "-step=" in stem:
+        return int(stem.rsplit("=", 1)[-1])
+    if stem.startswith("step-") and stem[5:].isdigit():
+        return int(stem[5:])
+    return 0
 
 
 def _episode_dataset(cfg: DictConfig, indices: list[int] | None) -> GranularEpisodeDataset:
@@ -235,16 +115,22 @@ def build_dataloaders(cfg: DictConfig) -> tuple[DataLoader, DataLoader | None]:
     return train_loader, val_loader
 
 
-def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool) -> L.Trainer:
+def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool, val_loader: DataLoader | None = None) -> L.Trainer:
+    checkpoint_dir = run_dir / "checkpoints"
+    checkpoint_every = int(cfg.train.checkpoint_every)
+    keep_last = int(cfg.train.get("checkpoint_keep_last", 5))
     callbacks = [
         ModelCheckpoint(
-            dirpath=run_dir / "checkpoints",
-            filename="{step}",
+            dirpath=checkpoint_dir,
+            filename="step-{step}",
             save_top_k=-1,
-            every_n_train_steps=cfg.train.checkpoint_every,
+            every_n_train_steps=checkpoint_every,
+            save_last=True,
         ),
         LearningRateMonitor(logging_interval="step"),
     ]
+    if keep_last > 0:
+        callbacks.append(KeepLastCheckpoints(checkpoint_dir, keep_last, checkpoint_every))
 
     loggers = [CSVLogger(save_dir=run_dir, name="csv")]
     if cfg.log.get("wandb", False):
@@ -261,8 +147,13 @@ def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool) -> L.Trainer:
     if isinstance(devices, int) and devices > 1:
         strategy = "ddp"
 
-    val_every = cfg.train.get("val_every")
-    limit_val_batches = cfg.train.get("val_max_batches", 32) if has_val else 0
+    val_every = int(cfg.train.get("val_every", 0) or 0)
+    step_val = has_val and val_every > 0
+    limit_val_batches = 0 if step_val else (cfg.train.get("val_max_batches", 32) if has_val else 0)
+    if step_val and val_loader is not None:
+        callbacks.append(
+            ValidateEveryNSteps(val_every, int(cfg.train.get("val_max_batches", 32)), val_loader)
+        )
 
     return L.Trainer(
         max_steps=cfg.train.max_steps,
@@ -272,7 +163,7 @@ def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool) -> L.Trainer:
         precision=cfg.train.precision,
         gradient_clip_val=cfg.train.get("grad_clip"),
         log_every_n_steps=cfg.log.every_n_steps,
-        val_check_interval=val_every if has_val and val_every else None,
+        check_val_every_n_epoch=0 if step_val else 1,
         limit_val_batches=limit_val_batches,
         default_root_dir=str(run_dir),
         callbacks=callbacks,
@@ -293,5 +184,5 @@ def train(cfg: DictConfig) -> None:
     module_cls = STAGES[stage]
     module = module_cls(cfg)
     train_loader, val_loader = build_dataloaders(cfg)
-    trainer = build_trainer(cfg, run_dir, has_val=val_loader is not None)
+    trainer = build_trainer(cfg, run_dir, has_val=val_loader is not None, val_loader=val_loader)
     trainer.fit(module, train_dataloaders=train_loader, val_dataloaders=val_loader)
