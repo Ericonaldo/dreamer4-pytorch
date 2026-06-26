@@ -8,7 +8,7 @@ data:
   val_fraction: 0.05
   val_seed: 0
 
-tokenizer_ckpt: logs/walker_walk/tokenizer/checkpoints/last.ckpt
+tokenizer_ckpt: logs/walker_walk/tokenizer/checkpoints/step-step=10000.ckpt
 
 model:
   tokenizer:
@@ -36,16 +36,20 @@ model:
   scale_pos_embeds: true
   packing_factor: 2
   n_register: 4
+  n_agent: 1
   action_dim: 6
-  space_mode: wm_agent
+  space_mode: wm_dynamics
 
 train:
   batch_size: 16
-  max_steps: 50_000
-  checkpoint_every: 2_500
+  max_steps: 10_000
+  checkpoint_every: 1000
   checkpoint_keep_last: 5
   val_every: 1000
   val_max_batches: 8
+  rollout_ctx: 8
+  rollout_horizon: 8
+  rollout_flow_steps: 8
   devices: 1
   accelerator: gpu
   precision: bf16-mixed
@@ -62,3 +66,4 @@ log:
   every_n_steps: 100
   wandb: false
   project: dreamer4-walker-walk
+  viz_max_items: 4

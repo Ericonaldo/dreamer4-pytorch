@@ -20,6 +20,7 @@ class Modality(IntEnum):
     REGISTER = 3
     SPATIAL = 4
     NOISE = 5
+    AGENT = 6
 
 
 @dataclass(frozen=True)
@@ -185,10 +186,16 @@ class SpaceSelfAttentionModality(nn.Module):
             allow_lat_q = is_k_lat
             allow_nonlat_q = same_mod | is_k_lat
             return torch.where(is_q_lat, allow_lat_q, allow_nonlat_q)
-        if self.mode == "wm_agent":
-            return torch.ones((S, S), dtype=torch.bool, device=device)
-        else:
-            raise ValueError(f"Unsupported space mode: {self.mode}")
+        elif self.mode == "wm_dynamics":
+            # Ref wm_agent_isolated: reserve agent slot; world tokens ignore agent; agent only sees agent.
+            q_mod = self.modality_ids[q_idx]
+            k_mod = self.modality_ids[k_idx]
+            is_q_agent = q_mod == int(Modality.AGENT)
+            is_k_agent = k_mod == int(Modality.AGENT)
+            allow = torch.ones((S, S), dtype=torch.bool, device=device)
+            allow = torch.where(~is_q_agent, ~is_k_agent, allow)
+            return torch.where(is_q_agent, is_k_agent, allow)
+        raise ValueError(f"Unsupported space mode: {self.mode}")
 
     def forward(self, x_btSd: torch.Tensor) -> torch.Tensor:
         B, T, S, D = x_btSd.shape

@@ -41,9 +41,10 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [x] `DynamicsModule` training with frozen tokenizer encode
 - [ ] Shortcut forcing + bootstrap self-consistency loss (ref `dynamics_pretrain_loss` self branch)
 - [ ] Discrete noise schedule / `k_max` grid (ref uses finest-step flow grid)
-- [ ] Agent / task tokens (`wm_agent_isolated`, proprio conditioning)
-- [ ] Dynamics eval + decode rollout viz (tokenizer decoder)
-- [ ] Config tuning; align `model.tokenizer` with trained tokenizer ckpt arch
+- [x] Agent token slot — `n_agent=1`, zero agent at pretrain, `wm_dynamics` (ref `wm_agent_isolated`); `forward` returns `h_t` for BC
+- [ ] `TaskEmbedder` + conditioned agent tokens (BC / finetune)
+- [x] Action-conditioned rollout eval — dataset actions, autoregressive latent sampling, decode, `val/rollout_mse` / PSNR vs floor, wandb viz
+- [x] Dynamics config aligned with tokenizer ckpt (`tokenizer_ckpt`, arch in `dynamics.yaml`)
 
 ### BC (stage 3)
 
