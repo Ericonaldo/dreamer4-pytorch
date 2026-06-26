@@ -91,3 +91,6 @@ class BCModule(BaseModule):
         if stage == "val":
             self.log("val/loss", loss, sync_dist=True)
         return loss
+
+    def validation_step(self, batch, batch_idx):
+        return self._shared_step(batch, "val")
