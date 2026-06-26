@@ -92,6 +92,16 @@ def _episode_dataset(cfg: DictConfig, episode_indices: list[int] | None) -> Gran
     )
 
 
+def _granular_worker_init_fn(_worker_id: int) -> None:
+    """Granular mmap readers are not fork-safe; reopen in each DataLoader worker."""
+    info = torch.utils.data.get_worker_info()
+    if info is None:
+        return
+    dataset = info.dataset
+    if isinstance(dataset, GranularEpisodeDataset):
+        dataset.reset_reader()
+
+
 def build_dataloaders(cfg: DictConfig) -> tuple[DataLoader, DataLoader | None]:
     val_fraction = float(cfg.data.get("val_fraction", 0.0))
     probe = _episode_dataset(cfg, episode_indices=None)
@@ -115,6 +125,7 @@ def build_dataloaders(cfg: DictConfig) -> tuple[DataLoader, DataLoader | None]:
         pin_memory=True,
         collate_fn=collate_episodes,
         drop_last=True,
+        worker_init_fn=_granular_worker_init_fn if cfg.data.num_workers > 0 else None,
     )
 
     val_loader = None
@@ -128,6 +139,7 @@ def build_dataloaders(cfg: DictConfig) -> tuple[DataLoader, DataLoader | None]:
             pin_memory=True,
             collate_fn=collate_episodes,
             drop_last=False,
+            worker_init_fn=_granular_worker_init_fn if cfg.data.num_workers > 0 else None,
         )
     return train_loader, val_loader
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -81,11 +82,17 @@ def split_episode_indices(
     return train_idx, val_idx
 
 
+def _open_granular_reader(path: str):
+    import granular
+
+    return granular.ShardedDatasetReader(path, granular.decoders)
+
+
 def _discover_episodes(reader, n_chunks: int, chunk_size: int = CHUNK_SIZE) -> list[tuple[int, int]]:
     """Return inclusive global step ranges (start, end) for each complete episode."""
     events: list[tuple[int, str]] = []
     for i in range(n_chunks):
-        elem = reader[i]
+        elem = reader[i, ("length", "data")]
         length = min(int(elem["length"]), chunk_size)
         g0 = i * chunk_size
         is_first = np.asarray(elem["data"]["is_first"][:length])
@@ -142,7 +149,7 @@ class _ChunkCache:
 
     def get(self, chunk_idx: int) -> dict[str, Any]:
         if self._idx != chunk_idx:
-            self._data = self.reader[chunk_idx]["data"]
+            self._data = self.reader[chunk_idx, ("data",)]["data"]
             self._idx = chunk_idx
         assert self._data is not None
         return self._data
@@ -202,8 +209,6 @@ class GranularEpisodeDataset(Dataset):
         *,
         indices: list[int] | None = None,
     ):
-        import granular
-
         if indices is not None:
             if episode_indices is not None:
                 raise ValueError("Pass episode_indices or legacy indices, not both")
@@ -212,16 +217,23 @@ class GranularEpisodeDataset(Dataset):
         if window_mode not in ("frame", "transition"):
             raise ValueError(f"window_mode must be 'frame' or 'transition', got {window_mode!r}")
 
-        self.reader = granular.ShardedDatasetReader(path, granular.decoders)
+        self.path = path
         self.seq_len = int(seq_len)
         self.obs_mode = obs_mode
         self.window_mode = window_mode
         self.chunk_size = int(chunk_size)
         self.transform = transform
-        self._cache = _ChunkCache(self.reader)
+        self._reader = None
+        self._cache: _ChunkCache | None = None
+        self._reader_pid: int | None = None
 
-        n_chunks = len(self.reader)
-        self.episodes = _discover_episodes(self.reader, n_chunks, self.chunk_size)
+        reader = _open_granular_reader(path)
+        try:
+            n_chunks = len(reader)
+            self.episodes = _discover_episodes(reader, n_chunks, self.chunk_size)
+        finally:
+            reader.close()
+
         ep_filter = set(episode_indices) if episode_indices is not None else None
         self.valid = _build_valid_starts(
             self.episodes,
@@ -244,6 +256,26 @@ class GranularEpisodeDataset(Dataset):
     def num_episodes(self) -> int:
         return len(self.episodes)
 
+    def _ensure_reader(self) -> _ChunkCache:
+        """Open a Granular reader in the current process (fork-safe for DataLoader workers)."""
+        pid = os.getpid()
+        if self._reader is None or self._reader_pid != pid:
+            if self._reader is not None:
+                self._reader.close()
+            self._reader = _open_granular_reader(self.path)
+            self._cache = _ChunkCache(self._reader)
+            self._reader_pid = pid
+        assert self._cache is not None
+        return self._cache
+
+    def reset_reader(self) -> None:
+        """Drop cached reader handles (e.g. from DataLoader worker_init_fn)."""
+        if self._reader is not None:
+            self._reader.close()
+        self._reader = None
+        self._cache = None
+        self._reader_pid = None
+
     def __len__(self) -> int:
         return len(self.valid)
 
@@ -257,13 +289,14 @@ class GranularEpisodeDataset(Dataset):
         return global_start, n, global_start, n, global_start, n
 
     def __getitem__(self, index: int) -> dict[str, Any]:
+        cache = self._ensure_reader()
         _, global_start = self.valid[index]
         obs_start, obs_len, act_start, act_len, rew_start, rew_len = self._window_bounds(global_start)
 
-        obs_data = _slice_global(self._cache, obs_start, obs_len, self.chunk_size)
+        obs_data = _slice_global(cache, obs_start, obs_len, self.chunk_size)
         if self.window_mode == "transition":
-            act_data = _slice_global(self._cache, act_start, act_len, self.chunk_size)
-            rew_data = _slice_global(self._cache, rew_start, rew_len, self.chunk_size)
+            act_data = _slice_global(cache, act_start, act_len, self.chunk_size)
+            rew_data = _slice_global(cache, rew_start, rew_len, self.chunk_size)
         else:
             act_data = obs_data
             rew_data = obs_data
