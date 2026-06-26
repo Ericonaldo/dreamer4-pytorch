@@ -7,7 +7,7 @@ import torch
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import DictConfig
 
-from dreamer4.data import align_wm_obs_action
+from dreamer4.data import align_dynamics_batch
 from dreamer4.modules.base import BaseModule
 
 
@@ -57,7 +57,7 @@ class DynamicsModule(BaseModule):
         from dreamer4.models.dynamics import flow_matching_loss
 
         prefix = "val" if stage == "val" else self.stage
-        image, action = align_wm_obs_action(batch.image, batch.action)
+        image, action, _ = align_dynamics_batch(batch.image, batch.action)
         with torch.no_grad():
             z1 = self._encode_packed(image)
         loss, metrics = flow_matching_loss(self.model, z1, action)
@@ -70,7 +70,7 @@ class DynamicsModule(BaseModule):
 
     def validation_step(self, batch, batch_idx):
         if batch_idx == 0 and self.trainer.is_global_zero and batch.image is not None:
-            image, action = align_wm_obs_action(batch.image, batch.action)
+            image, action, _ = align_dynamics_batch(batch.image, batch.action)
             self._val_rollout_batch = (image.detach(), action.detach())
         return self._shared_step(batch, "val")
 

@@ -41,16 +41,35 @@ def collate_episodes(items: list[dict[str, Any]]) -> Batch:
     )
 
 
-def align_wm_obs_action(
+def align_dynamics_batch(
     image: torch.Tensor | None,
     action: torch.Tensor,
-) -> tuple[torch.Tensor | None, torch.Tensor]:
-    """Transition windows: (B,T+1,...) obs with (B,T,...) act -> encode first T frames."""
+    reward: torch.Tensor | None = None,
+) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor | None]:
+    """
+    Dreamer transition layout (ref nicklashansen / lucidrains / dreamer4-jax).
+
+    Dataset transition windows provide:
+      obs [s0..sT] (T+1), actions [a1..aT] (T), rewards [r1..rT] (T),
+    with s_{t-1} -- a_t --> s_t and reward r_t.
+
+    Dynamics time t uses frame s_t, action a_t (0 at t=0), reward r_t (0 at t=0).
+    """
     if image is None:
-        return None, action
-    if image.shape[1] == action.shape[1] + 1:
-        return image[:, :-1], action
-    return image, action
+        return None, action, reward
+    if image.shape[1] != action.shape[1] + 1:
+        return image, action, reward
+
+    t1 = image.shape[1]
+    action_aligned = action.new_zeros(action.shape[0], t1, *action.shape[2:])
+    action_aligned[:, 1:] = action
+
+    reward_aligned = None
+    if reward is not None:
+        reward_aligned = reward.new_zeros(reward.shape[0], t1, *reward.shape[2:])
+        reward_aligned[:, 1:] = reward
+
+    return image, action_aligned, reward_aligned
 
 
 def _proprio_vector(data: dict[str, Any]) -> np.ndarray:
@@ -192,8 +211,9 @@ class GranularEpisodeDataset(Dataset):
 
     ``window_mode``:
       - ``frame`` (tokenizer): ``seq_len`` frames for image/proprio/action/reward.
-      - ``transition`` (dynamics/bc): ``seq_len+1`` obs, ``seq_len`` action/reward with
-        ``obs[t] -- action[t] --> obs[t+1]`` and ``reward[t+1]`` (embodied Granular layout).
+      - ``transition`` (dynamics/bc): ``seq_len+1`` obs ``[s0..sT]``, ``seq_len`` actions
+        ``[a1..aT]`` and rewards ``[r1..rT]`` (Dreamer: ``s_{t-1} -- a_t --> s_t``).
+        Use ``align_dynamics_batch`` to pad action/reward at ``t=0``.
     """
 
     def __init__(

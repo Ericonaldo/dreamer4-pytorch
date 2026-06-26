@@ -7,7 +7,7 @@ from lightning.pytorch.utilities import rank_zero_warn
 from omegaconf import DictConfig
 
 from dreamer4.bc_env_eval import AsyncBCEval
-from dreamer4.data import align_wm_obs_action
+from dreamer4.data import align_dynamics_batch
 from dreamer4.modules.base import BaseModule
 
 
@@ -78,7 +78,7 @@ class BCModule(BaseModule):
             raise ValueError("BC training requires images; set data.obs_mode=image or both")
 
         prefix = "val" if stage == "val" else self.stage
-        image, action = align_wm_obs_action(batch.image, batch.action)
+        image, action, reward = align_dynamics_batch(batch.image, batch.action, batch.reward)
         with torch.no_grad():
             packed_z = self._encode_packed(image)
 
@@ -86,7 +86,7 @@ class BCModule(BaseModule):
         loss, metrics = self._bc_loss(
             outputs,
             action,
-            batch.reward,
+            reward,
             action_horizon=self.action_horizon,
             action_weight=self.action_weight,
             reward_weight=self.reward_weight,

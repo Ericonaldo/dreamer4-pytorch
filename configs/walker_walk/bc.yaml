@@ -2,7 +2,7 @@ stage: bc
 
 data:
   path: data/dmc_walker_walk
-  seq_len: 32
+  seq_len: 16
   obs_mode: image
   num_workers: 8 
   val_fraction: 0.05
@@ -47,8 +47,8 @@ model:
   value_hidden: 256
 
 train:
-  batch_size: 32
-  max_steps: 25_000
+  batch_size: 128
+  max_steps: 20_000
   checkpoint_every: 2000
   checkpoint_keep_last: 5
   val_every: 1000
@@ -62,7 +62,7 @@ train:
   precision: bf16-mixed
   grad_clip: 1.0
   optimizer:
-    lr: 3.0e-4
+    lr: 5.0e-4
     betas: [0.9, 0.95]
     weight_decay: 0.01
     use_scheduler: true
@@ -71,7 +71,7 @@ log:
   dir: logs
   run_name: walker_walk/bc
   every_n_steps: 100
-  wandb: false
+  wandb: true
   project: dreamer4-walker-walk
 
 eval:

@@ -329,7 +329,7 @@ def _annotate_multictx_panel(
                 continue
             ctx_w = ctx * frame_w
             has_gap = gap_px > 0 and 0 < ctx < total_frames
-            rollout_x = ctx_w + gap_px if has_gap else ctx_w
+            first_rollout_x = ctx_w + gap_px if has_gap else ctx_w
             mid_y = y0 + row_h // 2 - 6
             if ctx_w > 48:
                 draw.text(
@@ -340,9 +340,12 @@ def _annotate_multictx_panel(
                     stroke_fill=(0, 0, 0),
                     font=font,
                 )
-            if rollout_x + frame_w <= panel_hwc.shape[1]:
+            if first_rollout_x + frame_w <= panel_hwc.shape[1]:
+                bbox = draw.textbbox((0, 0), "rollout", font=font)
+                text_w = bbox[2] - bbox[0]
+                text_x = first_rollout_x + max(4, (frame_w - text_w) // 2)
                 draw.text(
-                    (rollout_x + 4, mid_y),
+                    (text_x, mid_y),
                     "rollout",
                     fill=(255, 255, 255),
                     stroke_width=1,

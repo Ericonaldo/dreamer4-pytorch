@@ -2,7 +2,7 @@ stage: dynamics
 
 data:
   path: data/dmc_walker_walk
-  seq_len: 32
+  seq_len: 16
   obs_mode: image
   num_workers: 8
   val_fraction: 0.05
@@ -41,11 +41,11 @@ model:
   space_mode: wm_dynamics
 
 train:
-  batch_size: 32
-  max_steps: 25_000
-  checkpoint_every: 1000
+  batch_size: 64
+  max_steps: 20_000
+  checkpoint_every: 500
   checkpoint_keep_last: 5
-  val_every: 1000
+  val_every: 500
   val_max_batches: 8
   rollout_ctx: 8
   rollout_horizon: 8
@@ -64,6 +64,6 @@ log:
   dir: logs
   run_name: walker_walk/dynamics
   every_n_steps: 100
-  wandb: false
+  wandb: true
   project: dreamer4-walker-walk
   viz_max_items: 4

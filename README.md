@@ -2,7 +2,7 @@
 
 Minimal PyTorch Lightning reimplementation of [Dreamer 4](https://arxiv.org/abs/2509.24527) for DMC Walker Walk.
 
-References: [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4), [edwhu/dreamer4-jax](https://github.com/edwhu/dreamer4-jax).
+References: [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4), [edwhu/dreamer4-jax](https://github.com/edwhu/dreamer4-jax), [lucidrains/dreamer4](https://github.com/lucidrains/dreamer4).
 
 Network structure
 ```
@@ -15,6 +15,21 @@ AgentHeads(h_t):
   - reward: MLP → (B,T,L)
   - value:  MLP → (B,T)
 ```
+
+Data token order
+
+**Tokenizer** (`window_mode=frame`):
+```
+t:  frame s_t
+```
+
+**Dynamics / BC** (`window_mode=transition`, after `align_dynamics_batch`):
+```
+t=0:  frame s0,  action 0 (NULL), reward 0
+t≥1:  frame s_t, action a_t,      reward r_t
+```
+
+Dataset raw (transition): `obs [s0..sT]`, `actions [a1..aT]`, `rewards [r1..rT]`.
 
 ## TODO
 

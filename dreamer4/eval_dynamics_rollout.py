@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from dreamer4.config import load_config
-from dreamer4.data import GranularEpisodeDataset, align_wm_obs_action, collate_episodes, split_episode_indices
+from dreamer4.data import GranularEpisodeDataset, align_dynamics_batch, collate_episodes, split_episode_indices
 from dreamer4.models import DynamicsModel, build_tokenizer
 from dreamer4.models.dynamics import run_dynamics_rollout_eval
 
@@ -93,7 +93,7 @@ def main() -> None:
     rollout_horizon = int(cfg.train.get("rollout_horizon", 8))
     rollout_flow_steps = int(cfg.train.get("rollout_flow_steps", 8))
 
-    image, action = align_wm_obs_action(batch.image.to(device), batch.action.to(device))
+    image, action, _ = align_dynamics_batch(batch.image.to(device), batch.action.to(device))
     metrics, panel, _, _, per_traj = run_dynamics_rollout_eval(
         dynamics,
         tokenizer,
