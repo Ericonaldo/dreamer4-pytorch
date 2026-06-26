@@ -44,15 +44,25 @@ class RandomPolicy:
 class BCPolicy:
     """Online BC agent: encode frames, teacher-forced actions, predict a_t from head."""
 
-    def __init__(self, cfg: DictConfig, device: torch.device):
+    def __init__(
+        self,
+        cfg: DictConfig,
+        device: torch.device,
+        *,
+        model: BCModel | None = None,
+        tokenizer: nn.Module | None = None,
+    ):
         self.device = device
         self.patch_size = int(cfg.model.tokenizer.patch_size)
         self.max_history = int(cfg.eval.get("max_history", 32))
         self.action_dim = int(cfg.model.dynamics.action_dim)
 
-        self.tokenizer = build_tokenizer(cfg.model.tokenizer)
-        if cfg.get("tokenizer_ckpt"):
-            _load_state(self.tokenizer, cfg.tokenizer_ckpt, prefix="model.")
+        if tokenizer is None:
+            self.tokenizer = build_tokenizer(cfg.model.tokenizer)
+            if cfg.get("tokenizer_ckpt"):
+                _load_state(self.tokenizer, cfg.tokenizer_ckpt, prefix="model.")
+        else:
+            self.tokenizer = tokenizer
         self.tokenizer.eval()
         for p in self.tokenizer.parameters():
             p.requires_grad_(False)
@@ -62,26 +72,30 @@ class BCPolicy:
         self.packing_factor = int(cfg.model.dynamics.get("packing_factor", 1))
         self.n_spatial = n_latents // self.packing_factor
 
-        self.model = BCModel(
-            cfg.model.dynamics,
-            n_latents=n_latents,
-            latent_dim=latent_dim,
-            heads_cfg=cfg.model,
-        )
-        if cfg.get("bc_ckpt"):
-            ckpt = torch.load(cfg.bc_ckpt, map_location="cpu", weights_only=False)
-            state = ckpt.get("state_dict", ckpt)
-            model_state = {
-                k.removeprefix("model."): v
-                for k, v in state.items()
-                if k.startswith("model.") and "attn_mask" not in k
-            }
-            self.model.load_state_dict(model_state, strict=False)
-        elif cfg.get("dynamics_ckpt"):
-            _load_state(self.model.dynamics, cfg.dynamics_ckpt, prefix="model.")
+        if model is None:
+            self.model = BCModel(
+                cfg.model.dynamics,
+                n_latents=n_latents,
+                latent_dim=latent_dim,
+                heads_cfg=cfg.model,
+            )
+            if cfg.get("bc_ckpt"):
+                ckpt = torch.load(cfg.bc_ckpt, map_location="cpu", weights_only=False)
+                state = ckpt.get("state_dict", ckpt)
+                model_state = {
+                    k.removeprefix("model."): v
+                    for k, v in state.items()
+                    if k.startswith("model.") and "attn_mask" not in k
+                }
+                self.model.load_state_dict(model_state, strict=False)
+            elif cfg.get("dynamics_ckpt"):
+                _load_state(self.model.dynamics, cfg.dynamics_ckpt, prefix="model.")
+        else:
+            self.model = model
         self.model.eval()
-        self.model.to(device)
-        self.tokenizer.to(device)
+        if model is None:
+            self.model.to(device)
+            self.tokenizer.to(device)
 
         self._z_packed: list[torch.Tensor] = []
         self._actions: list[torch.Tensor] = []
@@ -115,8 +129,7 @@ class BCPolicy:
             actions = torch.zeros(1, 1, self.action_dim, device=self.device)
 
         outputs = self.model(z_seq, actions)
-        action = outputs.action[0, -1, 0].float().cpu().numpy()
-        action = np.clip(action, -1.0, 1.0).astype(np.float32)
+        action = outputs.action[0, -1, 0].float().cpu().numpy().astype(np.float32)
         self._actions.append(torch.from_numpy(action).to(self.device))
         if len(self._actions) > self.max_history:
             self._actions.pop(0)

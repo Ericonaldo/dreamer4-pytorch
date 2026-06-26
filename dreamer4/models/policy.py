@@ -1,19 +1,48 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
-
-from dreamer4.models.dynamics import DynamicsModel
 
 
 def _cfg_dict(cfg: Mapping[str, Any] | DictConfig) -> dict[str, Any]:
     if isinstance(cfg, DictConfig):
         return OmegaConf.to_container(cfg, resolve=True)  # type: ignore[return-value]
     return dict(cfg)
+
+
+class ActionEncoder(nn.Module):
+    """Continuous actions (B,T,A) -> single token (B,T,1,D)."""
+
+    def __init__(self, d_model: int, action_dim: int, hidden_mult: float = 2.0):
+        super().__init__()
+        self.d_model = int(d_model)
+        self.action_dim = int(action_dim)
+        hidden = int(self.d_model * hidden_mult)
+        self.base = nn.Parameter(torch.empty(self.d_model))
+        nn.init.normal_(self.base, std=0.02)
+        self.fc1 = nn.Linear(self.action_dim, hidden)
+        self.fc2 = nn.Linear(hidden, self.d_model)
+        nn.init.normal_(self.fc2.weight, std=1e-3)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(
+        self,
+        actions: torch.Tensor,
+        *,
+        batch_time_shape: Optional[Tuple[int, int]] = None,
+    ) -> torch.Tensor:
+        if actions is None:
+            assert batch_time_shape is not None
+            B, T = batch_time_shape
+            out = self.base.view(1, 1, -1).expand(B, T, -1)
+        else:
+            out = self.fc2(F.silu(self.fc1(actions))) + self.base.view(1, 1, -1)
+        return out[:, :, None, :]
 
 
 class _MLPHead(nn.Module):
@@ -34,6 +63,7 @@ class _MLPHead(nn.Module):
 @dataclass
 class AgentOutputs:
     action: torch.Tensor
+    action_raw: torch.Tensor
     reward: torch.Tensor
     value: torch.Tensor
 
@@ -61,10 +91,11 @@ class AgentHeads(nn.Module):
     def forward(self, h_t: torch.Tensor) -> AgentOutputs:
         """h_t: (B, T, D) pooled agent readout."""
         B, T, D = h_t.shape
-        action = self.policy(h_t).view(B, T, self.action_horizon, self.action_dim)
+        raw = self.policy(h_t).view(B, T, self.action_horizon, self.action_dim)
+        action = torch.tanh(raw)
         reward = self.reward(h_t).view(B, T, self.action_horizon)
         value = self.value(h_t).squeeze(-1)
-        return AgentOutputs(action=action, reward=reward, value=value)
+        return AgentOutputs(action=action, action_raw=raw, reward=reward, value=value)
 
 
 class BCModel(nn.Module):
@@ -79,6 +110,8 @@ class BCModel(nn.Module):
         heads_cfg: Mapping[str, Any] | DictConfig,
     ):
         super().__init__()
+        from dreamer4.models.dynamics import DynamicsModel
+
         raw = _cfg_dict(dynamics_cfg)
         self.action_dim = int(raw["action_dim"])
         self.n_agent = int(raw.get("n_agent", 1))
@@ -145,20 +178,32 @@ def bc_loss(
     B, T, _ = actions.shape
     device = actions.device
     valid = _valid_future_mask(T, action_horizon, device).float()
+    denom = (valid.sum() * B).clamp_min(1.0)
 
-    target_a = _future_targets(actions, action_horizon)
-    action_err = (outputs.action.float() - target_a.float()).pow(2).mean(dim=-1)
-    action_mse = (action_err * valid).sum() / valid.sum().clamp_min(1.0)
+    target_a = _future_targets(actions, action_horizon).clamp(-1.0, 1.0)
+    # Train in pre-tanh space; tanh is only for bounded env actions at inference.
+    action_err = (outputs.action_raw.float() - target_a.float()).pow(2).mean(dim=-1)
+    action_mse = (action_err * valid).sum() / denom
+
+    tanh_err = (outputs.action.float() - target_a.float()).pow(2).mean(dim=-1)
+    action_mse_tanh = (tanh_err * valid).sum() / denom
 
     target_r = _future_targets(rewards.unsqueeze(-1), action_horizon).squeeze(-1)
     reward_err = (outputs.reward.float() - target_r.float()).pow(2)
-    reward_mse = (reward_err * valid).sum() / valid.sum().clamp_min(1.0)
+    reward_mse = (reward_err * valid).sum() / denom
 
     value_mse = (outputs.value.float() - rewards.float()).pow(2).mean()
 
     loss = action_weight * action_mse + reward_weight * reward_mse + value_weight * value_mse
+    pred = outputs.action.float()
     metrics = {
         "action_mse": float(action_mse.detach()),
+        "action_mse_tanh": float(action_mse_tanh.detach()),
+        "action_out_mean": float(pred.mean().detach()),
+        "action_out_abs_mean": float(pred.abs().mean().detach()),
+        "action_raw_mean": float(outputs.action_raw.float().mean().detach()),
+        "action_target_mean": float(target_a.mean().detach()),
+        "action_target_abs_mean": float(target_a.abs().mean().detach()),
         "reward_mse": float(reward_mse.detach()),
         "value_mse": float(value_mse.detach()),
     }

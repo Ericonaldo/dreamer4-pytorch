@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
+from lightning.pytorch.utilities import rank_zero_warn
 from omegaconf import DictConfig
 
+from dreamer4.bc_env_eval import AsyncBCEval
+from dreamer4.data import align_wm_obs_action
 from dreamer4.modules.base import BaseModule
 
 
@@ -29,6 +34,7 @@ class BCModule(BaseModule):
         self._pack = pack_bottleneck_to_spatial
         self._encode_images = encode_images
         self._bc_loss = bc_loss
+        self._env_eval = AsyncBCEval()
 
         self.tokenizer = build_tokenizer(cfg.model.tokenizer)
         if cfg.get("tokenizer_ckpt"):
@@ -52,7 +58,6 @@ class BCModule(BaseModule):
         if cfg.get("dynamics_ckpt"):
             _load_state(self.model.dynamics, cfg.dynamics_ckpt, prefix="model.")
 
-        # BC loss only uses agent readout; flow_head is unused and breaks DDP.
         for p in self.model.dynamics.flow_head.parameters():
             p.requires_grad_(False)
 
@@ -73,13 +78,14 @@ class BCModule(BaseModule):
             raise ValueError("BC training requires images; set data.obs_mode=image or both")
 
         prefix = "val" if stage == "val" else self.stage
+        image, action = align_wm_obs_action(batch.image, batch.action)
         with torch.no_grad():
-            packed_z = self._encode_packed(batch.image)
+            packed_z = self._encode_packed(image)
 
-        outputs = self.model(packed_z, batch.action)
+        outputs = self.model(packed_z, action)
         loss, metrics = self._bc_loss(
             outputs,
-            batch.action,
+            action,
             batch.reward,
             action_horizon=self.action_horizon,
             action_weight=self.action_weight,
@@ -87,7 +93,7 @@ class BCModule(BaseModule):
             value_weight=self.value_weight,
         )
         for key, value in metrics.items():
-            prog = stage == "train" and key == "action_mse"
+            prog = stage == "train" and key in ("action_mse", "action_out_mean", "action_mse_tanh")
             self.log(f"{prefix}/{key}", value, prog_bar=prog, sync_dist=True)
         if stage == "val":
             self.log("val/loss", loss, sync_dist=True)
@@ -95,3 +101,23 @@ class BCModule(BaseModule):
 
     def validation_step(self, batch, batch_idx):
         return self._shared_step(batch, "val")
+
+    def on_train_batch_end(self, *_) -> None:
+        if self.trainer.is_global_zero:
+            self._env_eval.poll(self)
+
+    def on_validation_epoch_end(self) -> None:
+        if not self.trainer.is_global_zero:
+            return
+        eval_cfg = self.cfg.get("eval", {})
+        if not eval_cfg.get("env_eval", True):
+            return
+        try:
+            from dreamer4.bc_env_eval import run_bc_env_eval  # noqa: F401
+        except ImportError as exc:
+            rank_zero_warn(f"Skipping BC env eval (install dreamer4[dmc]): {exc}")
+            return
+
+        step = int(self.trainer.global_step)
+        run_dir = Path(self.cfg.log.dir) / self.cfg.log.run_name
+        self._env_eval.start(step, self.cfg, self.model, self.tokenizer, run_dir)

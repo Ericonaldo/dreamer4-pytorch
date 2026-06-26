@@ -8,9 +8,10 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
+from dreamer4.bc_env_eval import run_bc_env_eval
 from dreamer4.config import load_config
 from dreamer4.env import make_dmc_env
-from dreamer4.policy_agent import BCPolicy, RandomPolicy, run_episodes, summarize_episodes
+from dreamer4.policy_agent import RandomPolicy, run_episodes, summarize_episodes
 
 
 def main() -> None:
@@ -18,7 +19,8 @@ def main() -> None:
     parser.add_argument("config", type=Path, help="BC or policy YAML config")
     parser.add_argument("--policy", choices=["random", "bc"], default="random")
     parser.add_argument("--bc-ckpt", type=Path, default=None, help="BC Lightning checkpoint")
-    parser.add_argument("--episodes", type=int, default=50)
+    parser.add_argument("--episodes", type=int, default=None)
+    parser.add_argument("--gpus", type=int, default=None, help="Number of GPUs for BC eval")
     parser.add_argument("--out", type=Path, default=None, help="Write metrics JSON here")
     parser.add_argument("--task", type=str, default=None, help="DMC task name, e.g. walker_walk")
     parser.add_argument("overrides", nargs="*", help="Config overrides")
@@ -31,35 +33,35 @@ def main() -> None:
         cfg = load_config(args.config, args.overrides)
     if args.bc_ckpt is not None:
         cfg.bc_ckpt = str(args.bc_ckpt)
-
-    if args.policy == "bc":
-        import torch
-
-        device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    else:
-        device = None
+    if args.task is not None:
+        cfg.eval.task = args.task
 
     eval_cfg = cfg.get("eval", {})
-    task = args.task or str(eval_cfg.get("task", "walker_walk"))
-    env = make_dmc_env(
-        task,
-        repeat=int(eval_cfg.get("action_repeat", 2)),
-        image_size=int(eval_cfg.get("image_size", 64)),
-        proprio=bool(eval_cfg.get("proprio", False)),
-        image=bool(eval_cfg.get("image", True)),
-        camera=int(eval_cfg.get("camera_id", -1)),
-        max_episode_steps=int(eval_cfg.get("max_episode_steps", 1000)),
-    )
+    episodes = int(args.episodes or eval_cfg.get("episodes", 10))
+    task = str(eval_cfg.get("task", "walker_walk"))
 
     if args.policy == "random":
+        env = make_dmc_env(
+            task,
+            repeat=int(eval_cfg.get("action_repeat", 2)),
+            image_size=int(eval_cfg.get("image_size", 64)),
+            proprio=bool(eval_cfg.get("proprio", False)),
+            image=bool(eval_cfg.get("image", True)),
+            camera=int(eval_cfg.get("camera_id", -1)),
+            max_episode_steps=int(eval_cfg.get("max_episode_steps", 1000)),
+        )
         policy = RandomPolicy(action_dim=env.action_dim)
+        metrics = summarize_episodes(run_episodes(env, policy, episodes))
     else:
         if not cfg.get("bc_ckpt"):
             raise ValueError("BC eval requires bc_ckpt in config or --bc-ckpt")
-        policy = BCPolicy(cfg, device)
+        import torch
 
-    stats = run_episodes(env, policy, args.episodes)
-    metrics = summarize_episodes(stats)
+        gpu_ids = list(range(args.gpus)) if args.gpus else None
+        if gpu_ids is None and torch.cuda.is_available():
+            gpu_ids = list(range(torch.cuda.device_count()))
+        metrics = run_bc_env_eval(cfg, num_episodes=episodes, gpu_ids=gpu_ids)
+
     metrics["policy"] = args.policy
     metrics["task"] = task
 

@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
 
-from dreamer4.models.action_encoder import ActionEncoder
+from dreamer4.models.policy import ActionEncoder
 from dreamer4.models.tokenizer import encode_images, temporal_unpatchify
 from dreamer4.models.transformer_blocks import (
     BlockCausalTransformer,

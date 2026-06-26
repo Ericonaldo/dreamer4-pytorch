@@ -16,7 +16,7 @@ model:
   embed_dim: 64
   depth: 8
   num_heads: 4
-  mlp_ratio: 4.0
+  mlp_ratio: 2.0
   latent_dim: 32
   time_every: 1
   latents_only_time: true

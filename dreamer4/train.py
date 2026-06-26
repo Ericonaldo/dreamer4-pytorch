@@ -74,30 +74,39 @@ def _checkpoint_step(path: Path) -> int:
     return int(tail) if tail.isdigit() else 0
 
 
-def _episode_dataset(cfg: DictConfig, indices: list[int] | None) -> GranularEpisodeDataset:
+def _window_mode(cfg: DictConfig) -> str:
+    mode = str(cfg.data.get("window_mode", "auto"))
+    if mode != "auto":
+        return mode
+    return "transition" if cfg.stage in ("dynamics", "bc") else "frame"
+
+
+def _episode_dataset(cfg: DictConfig, episode_indices: list[int] | None) -> GranularEpisodeDataset:
     return GranularEpisodeDataset(
         path=cfg.data.path,
         seq_len=cfg.data.seq_len,
         obs_mode=cfg.data.obs_mode,
-        indices=indices,
+        episode_indices=episode_indices,
+        window_mode=_window_mode(cfg),
+        verbose=bool(cfg.data.get("verbose", True)),
     )
 
 
 def build_dataloaders(cfg: DictConfig) -> tuple[DataLoader, DataLoader | None]:
     val_fraction = float(cfg.data.get("val_fraction", 0.0))
-    probe = _episode_dataset(cfg, indices=None)
-    n_episodes = len(probe)
+    probe = _episode_dataset(cfg, episode_indices=None)
+    n_episodes = probe.num_episodes
 
-    val_indices: list[int] | None = None
-    train_indices: list[int] | None = None
+    val_episodes: list[int] | None = None
+    train_episodes: list[int] | None = None
     if val_fraction > 0:
-        train_indices, val_indices = split_episode_indices(
+        train_episodes, val_episodes = split_episode_indices(
             n_episodes,
             val_fraction,
             int(cfg.data.get("val_seed", 0)),
         )
 
-    train_ds = _episode_dataset(cfg, train_indices)
+    train_ds = _episode_dataset(cfg, train_episodes)
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg.train.batch_size,
@@ -109,10 +118,10 @@ def build_dataloaders(cfg: DictConfig) -> tuple[DataLoader, DataLoader | None]:
     )
 
     val_loader = None
-    if val_indices is not None:
+    if val_episodes is not None:
         val_batch = int(cfg.train.get("val_batch_size", cfg.train.batch_size))
         val_loader = DataLoader(
-            _episode_dataset(cfg, val_indices),
+            _episode_dataset(cfg, val_episodes),
             batch_size=val_batch,
             shuffle=False,
             num_workers=cfg.data.num_workers,

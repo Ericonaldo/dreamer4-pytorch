@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from dreamer4.config import load_config
-from dreamer4.data import GranularEpisodeDataset, collate_episodes, split_episode_indices
+from dreamer4.data import GranularEpisodeDataset, align_wm_obs_action, collate_episodes, split_episode_indices
 from dreamer4.models import DynamicsModel, build_tokenizer
 from dreamer4.models.dynamics import run_dynamics_rollout_eval
 
@@ -62,10 +62,19 @@ def main() -> None:
     tokenizer.to(device)
 
     val_fraction = float(cfg.data.get("val_fraction", 0.05))
-    probe = GranularEpisodeDataset(cfg.data.path, cfg.data.seq_len, cfg.data.obs_mode)
-    _, val_idx = split_episode_indices(len(probe), val_fraction, int(cfg.data.get("val_seed", 0)))
+    window_mode = str(cfg.data.get("window_mode", "transition"))
+    probe = GranularEpisodeDataset(
+        cfg.data.path, cfg.data.seq_len, cfg.data.obs_mode, window_mode=window_mode
+    )
+    _, val_episodes = split_episode_indices(
+        probe.num_episodes, val_fraction, int(cfg.data.get("val_seed", 0))
+    )
     val_ds = GranularEpisodeDataset(
-        cfg.data.path, cfg.data.seq_len, cfg.data.obs_mode, indices=val_idx
+        cfg.data.path,
+        cfg.data.seq_len,
+        cfg.data.obs_mode,
+        episode_indices=val_episodes,
+        window_mode=window_mode,
     )
     batch = next(
         iter(
@@ -84,11 +93,12 @@ def main() -> None:
     rollout_horizon = int(cfg.train.get("rollout_horizon", 8))
     rollout_flow_steps = int(cfg.train.get("rollout_flow_steps", 8))
 
+    image, action = align_wm_obs_action(batch.image.to(device), batch.action.to(device))
     metrics, panel, _, _, per_traj = run_dynamics_rollout_eval(
         dynamics,
         tokenizer,
-        batch.image.to(device),
-        batch.action.to(device),
+        image,
+        action,
         patch_size=patch_size,
         packing_factor=packing_factor,
         n_spatial=n_spatial,

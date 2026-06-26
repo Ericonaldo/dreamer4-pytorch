@@ -7,6 +7,7 @@ import torch
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import DictConfig
 
+from dreamer4.data import align_wm_obs_action
 from dreamer4.modules.base import BaseModule
 
 
@@ -56,9 +57,10 @@ class DynamicsModule(BaseModule):
         from dreamer4.models.dynamics import flow_matching_loss
 
         prefix = "val" if stage == "val" else self.stage
+        image, action = align_wm_obs_action(batch.image, batch.action)
         with torch.no_grad():
-            z1 = self._encode_packed(batch.image)
-        loss, metrics = flow_matching_loss(self.model, z1, batch.action)
+            z1 = self._encode_packed(image)
+        loss, metrics = flow_matching_loss(self.model, z1, action)
         for key, value in metrics.items():
             prog = stage == "train" and key == "flow_mse"
             self.log(f"{prefix}/{key}", value, prog_bar=prog, sync_dist=True)
@@ -68,7 +70,8 @@ class DynamicsModule(BaseModule):
 
     def validation_step(self, batch, batch_idx):
         if batch_idx == 0 and self.trainer.is_global_zero and batch.image is not None:
-            self._val_rollout_batch = (batch.image.detach(), batch.action.detach())
+            image, action = align_wm_obs_action(batch.image, batch.action)
+            self._val_rollout_batch = (image.detach(), action.detach())
         return self._shared_step(batch, "val")
 
     def on_validation_epoch_end(self) -> None:
