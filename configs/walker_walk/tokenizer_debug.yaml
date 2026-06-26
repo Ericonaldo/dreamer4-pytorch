@@ -2,7 +2,7 @@ stage: tokenizer
 
 data:
   path: data/dmc_walker_walk
-  seq_len: 16
+  seq_len: 32
   obs_mode: image
   num_workers: 0
   val_fraction: 0.05
@@ -11,17 +11,17 @@ data:
 model:
   image_size: 64
   channels: 3
-  patch_size: 16
-  n_latents: 8
-  embed_dim: 128
+  patch_size: 8
+  n_latents: 32
+  embed_dim: 64
   depth: 2
   num_heads: 4
-  mlp_ratio: 2.0
+  mlp_ratio: 4.0
   latent_dim: 32
-  time_every: 2
+  time_every: 1
   latents_only_time: true
   scale_pos_embeds: true
-  dropout: 0.0
+  dropout: 0.05
   mae_p_min: 0.0
   mae_p_max: 0.5
 

@@ -7,6 +7,7 @@ from typing import Any, Mapping, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 
 from dreamer4.models.transformer_blocks import (
@@ -15,9 +16,24 @@ from dreamer4.models.transformer_blocks import (
     Modality,
     TokenLayout,
     add_sinusoidal_positions,
-    temporal_patchify,
-    temporal_unpatchify,
 )
+
+
+def temporal_patchify(videos_btchw: torch.Tensor, patch: int) -> torch.Tensor:
+    """(B,T,C,H,W) in [0,1] -> (B,T,Np,Dp)."""
+    B, T, C, H, W = videos_btchw.shape
+    x = videos_btchw.reshape(B * T, C, H, W)
+    cols = F.unfold(x, kernel_size=patch, stride=patch).transpose(1, 2).contiguous()
+    Np, Dp = cols.shape[1], cols.shape[2]
+    return cols.reshape(B, T, Np, Dp)
+
+
+def temporal_unpatchify(patches_btnd: torch.Tensor, H: int, W: int, C: int, patch: int) -> torch.Tensor:
+    """(B,T,Np,Dp) -> (B,T,C,H,W)."""
+    B, T, Np, Dp = patches_btnd.shape
+    x = patches_btnd.reshape(B * T, Np, Dp).transpose(1, 2).contiguous()
+    out = F.fold(x, output_size=(H, W), kernel_size=patch, stride=patch)
+    return out.reshape(B, T, C, H, W)
 
 
 def mae_recon_loss(
@@ -36,6 +52,13 @@ def mae_recon_loss(
 def full_recon_loss(pred_btnd: torch.Tensor, target_btnd: torch.Tensor) -> torch.Tensor:
     """MSE on all patches (stable val metric, no mask randomness)."""
     return (pred_btnd.float() - target_btnd.float()).pow(2).mean()
+
+
+def latent_temporal_std(z_btld: torch.Tensor) -> torch.Tensor:
+    """Mean std of bottleneck latents across time; low values indicate temporal collapse."""
+    if z_btld.shape[1] < 2:
+        return torch.zeros((), device=z_btld.device, dtype=torch.float32)
+    return z_btld.float().std(dim=1).mean()
 
 
 class Encoder(nn.Module):
@@ -290,6 +313,12 @@ def images_to_patches(image_bthwc: torch.Tensor, patch_size: int) -> torch.Tenso
     return temporal_patchify(x, patch_size)
 
 
+def encode_images(tokenizer: Tokenizer, image_bthwc: torch.Tensor, patch_size: int) -> torch.Tensor:
+    """Encode images to bottleneck latents (B,T,n_latents,latent_dim)."""
+    patches = images_to_patches(image_bthwc, patch_size)
+    return tokenizer.encode(patches)
+
+
 def tokenizer_forward_loss(
     model: Tokenizer,
     image_bthwc: torch.Tensor,
@@ -300,15 +329,17 @@ def tokenizer_forward_loss(
     lpips_frac: float = 1.0,
 ) -> Tuple[torch.Tensor, dict[str, float]]:
     patches = images_to_patches(image_bthwc, patch_size)
-    pred, mae_mask, _ = model(patches)
+    z, (mae_mask, _) = model.encoder(patches)
+    pred = model.decoder(z)
     mse = mae_recon_loss(pred, patches, mae_mask)
     metrics = {
         "loss_mae": float(mse.detach()),
         "masked_frac": float(mae_mask.float().mean().detach()),
+        "z_temporal_std": float(latent_temporal_std(z).detach()),
     }
 
     if lpips_fn is not None and lpips_weight > 0.0:
-        _, H, W, C = image_bthwc.shape
+        _, _, H, W, C = image_bthwc.shape
         lp = lpips_on_mae_recon(
             lpips_fn,
             pred,
@@ -339,16 +370,18 @@ def tokenizer_forward_with_aux(
 ) -> Tuple[torch.Tensor, dict[str, float], torch.Tensor, torch.Tensor, torch.Tensor]:
     """Forward + MAE loss; also returns pred, target patches, and MAE mask for viz."""
     patches = images_to_patches(image_bthwc, patch_size)
-    pred, mae_mask, _ = model(patches)
+    z, (mae_mask, _) = model.encoder(patches)
+    pred = model.decoder(z)
     mse = mae_recon_loss(pred, patches, mae_mask)
     metrics = {
         "loss_mae": float(mse.detach()),
         "loss_full": float(full_recon_loss(pred, patches).detach()),
         "masked_frac": float(mae_mask.float().mean().detach()),
+        "z_temporal_std": float(latent_temporal_std(z).detach()),
     }
 
     if lpips_fn is not None and lpips_weight > 0.0:
-        _, H, W, C = image_bthwc.shape
+        _, _, H, W, C = image_bthwc.shape
         lp = lpips_on_mae_recon(
             lpips_fn,
             pred,

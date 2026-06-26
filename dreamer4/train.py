@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import lightning as L
+import torch
 from lightning.pytorch.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from omegaconf import DictConfig
@@ -46,7 +47,8 @@ class KeepLastCheckpoints(Callback):
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
         step = trainer.global_step
         if self.keep_last > 0 and step > 0 and step % self.every_n_steps == 0:
-            self._prune()
+            if trainer.is_global_zero:
+                self._prune()
 
     def _prune(self) -> None:
         ckpts = [p for p in self.checkpoint_dir.glob("*.ckpt") if p.name != "last.ckpt"]
@@ -56,14 +58,20 @@ class KeepLastCheckpoints(Callback):
 
 
 def _checkpoint_step(path: Path) -> int:
+    """Extract global step from Lightning checkpoint filename for sorting."""
     stem = path.stem
     if stem.isdigit():
         return int(stem)
     if "-step=" in stem:
-        return int(stem.rsplit("=", 1)[-1])
-    if stem.startswith("step-") and stem[5:].isdigit():
-        return int(stem[5:])
-    return 0
+        tail = stem.rsplit("=", 1)[-1]
+    elif stem.startswith("step-"):
+        tail = stem[5:]
+    else:
+        return 0
+    # Lightning may suffix duplicates: step-step=6500-v1
+    if "-v" in tail:
+        tail = tail.split("-v", 1)[0]
+    return int(tail) if tail.isdigit() else 0
 
 
 def _episode_dataset(cfg: DictConfig, indices: list[int] | None) -> GranularEpisodeDataset:

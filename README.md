@@ -28,16 +28,22 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [x] Train / val loop, step-based eval, reconstruction viz, wandb
 - [x] Optional LPIPS loss (`train.use_lpips`, `tokenizer_w_lpips.yaml`)
 - [x] Multi-GPU DDP
+- [x] Latent temporal collapse — tune `embed_dim` / `latent_dim` (default configs: `embed_dim=64`, `latent_dim=32`, `patch_size=8`, `n_latents=16`; large 512-dim runs collapsed); monitor `tokenizer/z_temporal_std`
+- [x] Robust checkpoint pruning (`KeepLastCheckpoints` handles Lightning `-v1` suffixes, rank-0 only)
 - [ ] Resume from Lightning checkpoint (`train.resume_ckpt`)
 - [ ] Standalone tokenizer eval script (recon metrics + panels from checkpoint)
 - [ ] Ablation: `scale_pos_embeds` off (paper notes it can help)
 
 ### Dynamics (stage 2)
 
-- [ ] `DynamicsModel` — interactive dynamics + shortcut forcing (`models/dynamics.py` stub)
-- [ ] `DynamicsModule` training loop (`modules/dynamics.py`)
-- [ ] Config `configs/walker_walk/dynamics.yaml` — wire data, load frozen tokenizer ckpt
-- [ ] Action / proprio tokens in transformer layout (if not image-only)
+- [x] `DynamicsModel` — action + noise-conditioned flow on packed tokenizer latents
+- [x] Simple flow-matching loss (empirical MSE on clean latents, no shortcut/bootstrap)
+- [x] `DynamicsModule` training with frozen tokenizer encode
+- [ ] Shortcut forcing + bootstrap self-consistency loss (ref `dynamics_pretrain_loss` self branch)
+- [ ] Discrete noise schedule / `k_max` grid (ref uses finest-step flow grid)
+- [ ] Agent / task tokens (`wm_agent_isolated`, proprio conditioning)
+- [ ] Dynamics eval + decode rollout viz (tokenizer decoder)
+- [ ] Config tuning; align `model.tokenizer` with trained tokenizer ckpt arch
 
 ### BC (stage 3)
 
@@ -122,7 +128,7 @@ Tune `train.batch_size` if OOM; scale `data.num_workers` per GPU (e.g. 2–4).
 
 ### Tokenizer validation
 
-Episode-level hold-out via `data.val_fraction` (default 5%). Metrics: `val/loss_mae` (masked MSE, same as train) and `val/loss_full` (all-patch MSE, stable). Reconstruction panels (`target | masked | recon_masked | recon_full`) go to `logs/<run_name>/viz/` and wandb (`tokenizer/viz`) when `log.wandb=true`. Tune `train.val_every`, `train.val_max_batches`, `log.viz_max_items`.
+Episode-level hold-out via `data.val_fraction` (default 5%). Metrics: `val/loss_mae` (masked MSE, same as train), `val/loss_full` (all-patch MSE, stable), and `val/z_temporal_std` (latent diversity across time; should stay well above ~1e-3). Reconstruction panels (`target | masked | recon_masked | recon_full`) go to `logs/<run_name>/viz/` and wandb (`tokenizer/viz`) when `log.wandb=true`. Tune `train.val_every`, `train.val_max_batches`, `log.viz_max_items`.
 
 ## Remote training
 

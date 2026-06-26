@@ -2,39 +2,50 @@ stage: dynamics
 
 data:
   path: data/dmc_walker_walk
-  seq_len: 16
-  obs_mode: both
+  seq_len: 32
+  obs_mode: image
   num_workers: 4
+  val_fraction: 0.05
+  val_seed: 0
 
-tokenizer_ckpt: logs/walker_walk/tokenizer/checkpoints/latest.ckpt
+tokenizer_ckpt: logs/walker_walk/tokenizer/checkpoints/last.ckpt
 
 model:
   tokenizer:
     image_size: 64
     channels: 3
-    patch_size: 16
+    patch_size: 8
     n_latents: 16
-    embed_dim: 512
-    depth: 12
-    num_heads: 8
+    embed_dim: 64
+    depth: 8
+    num_heads: 4
     mlp_ratio: 4.0
     latent_dim: 32
-    time_every: 4
+    time_every: 1
     latents_only_time: true
     scale_pos_embeds: true
     dropout: 0.0
     mae_p_min: 0.0
     mae_p_max: 0.0
-  embed_dim: 512
-  depth: 12
-  num_heads: 8
+  embed_dim: 64
+  depth: 8
+  num_heads: 4
   mlp_ratio: 4.0
-  shortcut_steps: 4
+  dropout: 0.0
+  time_every: 1
+  scale_pos_embeds: true
+  packing_factor: 2
+  n_register: 4
+  action_dim: 6
+  space_mode: wm_agent
 
 train:
-  batch_size: 8
+  batch_size: 16
   max_steps: 50_000
   checkpoint_every: 2_500
+  checkpoint_keep_last: 5
+  val_every: 1000
+  val_max_batches: 8
   devices: 1
   accelerator: gpu
   precision: bf16-mixed

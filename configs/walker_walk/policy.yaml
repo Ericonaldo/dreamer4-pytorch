@@ -2,7 +2,7 @@ stage: policy
 
 data:
   path: data/dmc_walker_walk
-  seq_len: 16
+  seq_len: 32
   obs_mode: both
   num_workers: 4
 

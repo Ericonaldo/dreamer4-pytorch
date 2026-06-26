@@ -19,6 +19,7 @@ class Modality(IntEnum):
     PROPRIO = 2
     REGISTER = 3
     SPATIAL = 4
+    NOISE = 5
 
 
 @dataclass(frozen=True)
@@ -49,23 +50,6 @@ class TokenLayout:
                 out[m] = slice(idx, idx + n)
             idx += n
         return out
-
-
-def temporal_patchify(videos_btchw: torch.Tensor, patch: int) -> torch.Tensor:
-    """(B,T,C,H,W) in [0,1] -> (B,T,Np,Dp)."""
-    B, T, C, H, W = videos_btchw.shape
-    x = videos_btchw.reshape(B * T, C, H, W)
-    cols = F.unfold(x, kernel_size=patch, stride=patch).transpose(1, 2).contiguous()
-    Np, Dp = cols.shape[1], cols.shape[2]
-    return cols.reshape(B, T, Np, Dp)
-
-
-def temporal_unpatchify(patches_btnd: torch.Tensor, H: int, W: int, C: int, patch: int) -> torch.Tensor:
-    """(B,T,Np,Dp) -> (B,T,C,H,W)."""
-    B, T, Np, Dp = patches_btnd.shape
-    x = patches_btnd.reshape(B * T, Np, Dp).transpose(1, 2).contiguous()
-    out = F.fold(x, output_size=(H, W), kernel_size=patch, stride=patch)
-    return out.reshape(B, T, C, H, W)
 
 
 def sinusoid_table(n: int, d: int, base: float = 10000.0, device=None) -> torch.Tensor:
@@ -201,6 +185,8 @@ class SpaceSelfAttentionModality(nn.Module):
             allow_lat_q = is_k_lat
             allow_nonlat_q = same_mod | is_k_lat
             return torch.where(is_q_lat, allow_lat_q, allow_nonlat_q)
+        if self.mode == "wm_agent":
+            return torch.ones((S, S), dtype=torch.bool, device=device)
         else:
             raise ValueError(f"Unsupported space mode: {self.mode}")
 

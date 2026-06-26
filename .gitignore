@@ -20,6 +20,8 @@ data/
 .ruff_cache/
 .pytest_cache/
 progress.md
+TUTORIAL.md
+.venv/
 
 ref/
 scripts/
