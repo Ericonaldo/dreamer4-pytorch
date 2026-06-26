@@ -24,12 +24,37 @@ _REPO_EMBODIED = Path(__file__).resolve().parents[1] / "ref" / "embodied"
 if _REPO_EMBODIED.is_dir() and str(_REPO_EMBODIED) not in sys.path:
     sys.path.insert(0, str(_REPO_EMBODIED))
 
-import embodied  # noqa: E402
-from embodied.core.wrappers import ActionRepeat  # noqa: E402
-from embodied.envs.from_dm import FromDM  # noqa: E402
+
+def _load_embodied(name: str, rel_path: str):
+    import importlib.util
+
+    path = _REPO_EMBODIED / rel_path
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
 
 
-class DMC(embodied.Env):
+if "embodied" not in sys.modules:
+    import types
+
+    _emb = types.ModuleType("embodied")
+    _core = types.ModuleType("embodied.core")
+    _base = _load_embodied("embodied.core.base", "embodied/core/base.py")
+    _emb.Env = _base.Env
+    _core.Env = _base.Env
+    _emb.core = _core
+    sys.modules["embodied"] = _emb
+    sys.modules["embodied.core"] = _core
+    sys.modules["embodied.core.base"] = _base
+
+ActionRepeat = _load_embodied("embodied.core.wrappers", "embodied/core/wrappers.py").ActionRepeat
+FromDM = _load_embodied("embodied.envs.from_dm", "embodied/envs/from_dm.py").FromDM
+Env = sys.modules["embodied.core.base"].Env
+
+
+class DMC(Env):
     DEFAULT_CAMERAS = dict(
         quadruped=2,
         rodent=4,

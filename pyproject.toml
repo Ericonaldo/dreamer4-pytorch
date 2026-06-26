@@ -19,13 +19,18 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["ruff>=0.8.0"]
 lpips = ["lpips>=0.1.4"]
-dmc = ["dm-control>=1.0.14", "elements>=3.17.0"]
+dmc = [
+    "dm-control>=1.0.14",
+    "elements>=3.17.0",
+    "portal>=3.8.0",
+]
 
 [dependency-groups]
 dev = ["ruff>=0.8.0"]
 
 [project.scripts]
 dreamer4-train = "dreamer4.cli:main"
+dreamer4-eval = "dreamer4.eval_policy:main"
 
 [build-system]
 requires = ["setuptools>=75.0"]

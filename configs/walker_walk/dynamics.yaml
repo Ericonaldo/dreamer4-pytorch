@@ -4,7 +4,7 @@ data:
   path: data/dmc_walker_walk
   seq_len: 32
   obs_mode: image
-  num_workers: 4
+  num_workers: 8
   val_fraction: 0.05
   val_seed: 0
 
@@ -50,7 +50,7 @@ train:
   rollout_ctx: 8
   rollout_horizon: 8
   rollout_flow_steps: 10
-  devices: 1
+  devices: 8
   accelerator: gpu
   precision: bf16-mixed
   grad_clip: 1.0

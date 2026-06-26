@@ -4,7 +4,7 @@ data:
   path: data/dmc_walker_walk
   seq_len: 32
   obs_mode: both
-  num_workers: 4
+  num_workers: 8
 
 bc_ckpt: logs/walker_walk/bc/checkpoints/latest.ckpt
 
@@ -19,7 +19,7 @@ train:
   checkpoint_keep_last: 5
   val_every: 1000
   val_max_batches: 8
-  devices: 1
+  devices: 8
   accelerator: gpu
   precision: bf16-mixed
   grad_clip: 1.0
