@@ -42,15 +42,18 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [ ] Shortcut forcing + bootstrap self-consistency loss (ref `dynamics_pretrain_loss` self branch)
 - [ ] Discrete noise schedule / `k_max` grid (ref uses finest-step flow grid)
 - [x] Agent token slot — `n_agent=1`, zero agent at pretrain, `wm_dynamics` (ref `wm_agent_isolated`); `forward` returns `h_t` for BC
-- [ ] `TaskEmbedder` + conditioned agent tokens (BC / finetune)
+- [x] `wm_agent` space mask — agent attends world; world/action ignore agent keys
+- [ ] `TaskEmbedder` multi-task (Walker uses `n_tasks=1`)
 - [x] Action-conditioned rollout eval — dataset actions, autoregressive latent sampling, decode, `val/rollout_mse` / PSNR vs floor, wandb viz
 - [x] Dynamics config aligned with tokenizer ckpt (`tokenizer_ckpt`, arch in `dynamics.yaml`)
 
 ### BC (stage 3)
 
-- [ ] `AgentHeads` — policy, reward, value heads (`models/policy.py` stub)
-- [ ] `BCModule` training (`modules/bc.py`)
-- [ ] Config `configs/walker_walk/bc.yaml`
+- [x] `BCModel` — dynamics init (`dynamics_ckpt`), `wm_agent`, `TaskEmbedder`, `AgentHeads` (L-step action / reward + value, MSE)
+- [x] `BCModule` training with frozen tokenizer encode
+- [x] Config `configs/walker_walk/bc.yaml`, smoke `bc_debug.yaml`
+- [ ] Closed-loop L-step rollout BC (policy-fed actions into dynamics)
+- [ ] Config tuning; reward/value targets (returns vs raw reward)
 
 ### Policy / imagination (stage 4)
 
@@ -67,7 +70,7 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 ## Setup
 
 ```bash
-uv sync --extra data --extra log
+uv sync
 ```
 
 Dataset uses the [granular](https://github.com/danijar/granular) format:
@@ -152,7 +155,7 @@ Monitor: `ssh embo tail -f ~/mhliu/rclone_download.log`
 ```bash
 # On server (first time)
 cd ~/mhliu/dreamer4-pytorch
-uv sync --extra data --extra log
+uv sync
 uv run python -c "import torch; print(torch.cuda.device_count())"
 ```
 

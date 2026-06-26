@@ -3,13 +3,48 @@ stage: bc
 data:
   path: data/dmc_walker_walk
   seq_len: 32
-  obs_mode: both
+  obs_mode: image
   num_workers: 4
+  val_fraction: 0.05
+  val_seed: 0
 
-tokenizer_ckpt: logs/walker_walk/tokenizer/checkpoints/latest.ckpt
-dynamics_ckpt: logs/walker_walk/dynamics/checkpoints/latest.ckpt
+tokenizer_ckpt: logs/walker_walk/tokenizer/checkpoints/step-step=10000.ckpt
+dynamics_ckpt: logs/walker_walk/dynamics_bk/checkpoints/last.ckpt
 
 model:
+  tokenizer:
+    image_size: 64
+    channels: 3
+    patch_size: 8
+    n_latents: 16
+    embed_dim: 64
+    depth: 8
+    num_heads: 4
+    mlp_ratio: 4.0
+    latent_dim: 32
+    time_every: 1
+    latents_only_time: true
+    scale_pos_embeds: true
+    dropout: 0.0
+    mae_p_min: 0.0
+    mae_p_max: 0.0
+  dynamics:
+    embed_dim: 64
+    depth: 8
+    num_heads: 4
+    mlp_ratio: 4.0
+    dropout: 0.0
+    time_every: 1
+    scale_pos_embeds: true
+    packing_factor: 2
+    n_register: 4
+    n_agent: 1
+    action_dim: 6
+    space_mode: wm_agent
+    n_tasks: 1
+    use_task_ids: true
+  action_horizon: 8
+  task_id: 0
   policy_hidden: 256
   reward_hidden: 256
   value_hidden: 256
@@ -17,7 +52,14 @@ model:
 train:
   batch_size: 16
   max_steps: 20_000
-  checkpoint_every: 2_000
+  checkpoint_every: 2000
+  checkpoint_keep_last: 5
+  val_every: 1000
+  val_max_batches: 8
+  freeze_dynamics: false
+  action_weight: 1.0
+  reward_weight: 1.0
+  value_weight: 1.0
   devices: 1
   accelerator: gpu
   precision: bf16-mixed
@@ -26,7 +68,7 @@ train:
     lr: 3.0e-4
     betas: [0.9, 0.95]
     weight_decay: 0.01
-    use_scheduler: false
+    use_scheduler: true
 
 log:
   dir: logs

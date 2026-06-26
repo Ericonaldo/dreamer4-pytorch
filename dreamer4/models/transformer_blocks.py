@@ -195,6 +195,39 @@ class SpaceSelfAttentionModality(nn.Module):
             allow = torch.ones((S, S), dtype=torch.bool, device=device)
             allow = torch.where(~is_q_agent, ~is_k_agent, allow)
             return torch.where(is_q_agent, is_k_agent, allow)
+        elif self.mode == "wm_agent":
+            # Agent reads all; obs (spatial/register/noise) reads obs+action; action reads action only;
+            # non-agent queries never read agent keys (ref edwhu/dreamer4-jax).
+            q_mod = self.modality_ids[q_idx]
+            k_mod = self.modality_ids[k_idx]
+            is_q_agent = q_mod == int(Modality.AGENT)
+            is_k_agent = k_mod == int(Modality.AGENT)
+            is_q_action = q_mod == int(Modality.ACTION)
+            is_k_action = k_mod == int(Modality.ACTION)
+            is_obs_q = (
+                (q_mod == int(Modality.SPATIAL))
+                | (q_mod == int(Modality.REGISTER))
+                | (q_mod == int(Modality.NOISE))
+            )
+            is_obs_k = (
+                (k_mod == int(Modality.SPATIAL))
+                | (k_mod == int(Modality.REGISTER))
+                | (k_mod == int(Modality.NOISE))
+            )
+            allow_agent_q = torch.ones((S, S), dtype=torch.bool, device=device)
+            allow_for_action = is_k_action
+            allow_for_obs = is_obs_k | is_k_action
+            allow_nonagent = torch.where(
+                is_q_action,
+                allow_for_action.expand(S, S),
+                torch.where(
+                    is_obs_q,
+                    allow_for_obs.expand(S, S),
+                    torch.zeros((S, S), dtype=torch.bool, device=device),
+                ),
+            )
+            allow_nonagent = torch.where(is_k_agent, False, allow_nonagent)
+            return torch.where(is_q_agent, allow_agent_q, allow_nonagent)
         raise ValueError(f"Unsupported space mode: {self.mode}")
 
     def forward(self, x_btSd: torch.Tensor) -> torch.Tensor:

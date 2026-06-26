@@ -304,6 +304,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "einops" },
+    { name = "granular" },
     { name = "imageio" },
     { name = "lightning" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -311,17 +312,12 @@ dependencies = [
     { name = "omegaconf" },
     { name = "torch" },
     { name = "torchvision" },
+    { name = "wandb" },
 ]
 
 [package.optional-dependencies]
-data = [
-    { name = "granular" },
-]
 dev = [
     { name = "ruff" },
-]
-log = [
-    { name = "wandb" },
 ]
 lpips = [
     { name = "lpips" },
@@ -335,7 +331,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "einops", specifier = ">=0.8.0" },
-    { name = "granular", marker = "extra == 'data'" },
+    { name = "granular" },
     { name = "imageio", specifier = ">=2.37.0" },
     { name = "lightning", specifier = ">=2.4.0" },
     { name = "lpips", marker = "extra == 'lpips'", specifier = ">=0.1.4" },
@@ -344,9 +340,9 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
     { name = "torch", specifier = ">=2.4.0", index = "https://download.pytorch.org/whl/cu124" },
     { name = "torchvision", specifier = ">=0.19.0", index = "https://download.pytorch.org/whl/cu124" },
-    { name = "wandb", marker = "extra == 'log'", specifier = ">=0.18.0" },
+    { name = "wandb", specifier = ">=0.18.0" },
 ]
-provides-extras = ["data", "dev", "log", "lpips"]
+provides-extras = ["dev", "lpips"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ruff", specifier = ">=0.8.0" }]

@@ -239,6 +239,26 @@ def decode_packed_to_images(
     return frames.permute(0, 1, 3, 4, 2).clamp(0, 1)
 
 
+_ROLLOUT_ROW_LABELS = ("gt", "pred")
+
+
+def _annotate_rollout_panel_rows(panel_hwc: np.ndarray, row_h: int, n_samples: int) -> np.ndarray:
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.fromarray(panel_hwc)
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 11)
+    except OSError:
+        font = ImageFont.load_default()
+    n_rows = len(_ROLLOUT_ROW_LABELS)
+    for s in range(n_samples):
+        for r, label in enumerate(_ROLLOUT_ROW_LABELS):
+            y = s * n_rows * row_h + r * row_h + 2
+            draw.text((4, y), label, fill=(255, 255, 255), stroke_width=1, stroke_fill=(0, 0, 0), font=font)
+    return np.asarray(img)
+
+
 def rollout_panel_uint8(
     gt_bthwc: torch.Tensor,
     pred_bthwc: torch.Tensor,
@@ -272,7 +292,8 @@ def rollout_panel_uint8(
     pr_t = tile_time(pred)
     panel = torch.cat([gt_t, pr_t], dim=2)
     big = torch.cat([panel[i] for i in range(Bv)], dim=1)
-    return (big.clamp(0, 1) * 255.0).permute(1, 2, 0).to(torch.uint8).cpu().numpy()
+    out = (big.clamp(0, 1) * 255.0).permute(1, 2, 0).to(torch.uint8).cpu().numpy()
+    return _annotate_rollout_panel_rows(out, H, Bv)
 
 
 @torch.no_grad()
