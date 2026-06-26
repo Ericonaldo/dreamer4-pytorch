@@ -5,7 +5,6 @@ from dreamer4.models.dynamics import (
     run_dynamics_rollout_eval,
 )
 from dreamer4.models.policy import AgentHeads, BCModel, bc_loss
-from dreamer4.models.task_embedder import TaskEmbedder
 from dreamer4.models.tokenizer import (
     Tokenizer,
     build_tokenizer,
@@ -19,7 +18,6 @@ __all__ = [
     "AgentHeads",
     "BCModel",
     "DynamicsModel",
-    "TaskEmbedder",
     "Tokenizer",
     "bc_loss",
     "build_tokenizer",

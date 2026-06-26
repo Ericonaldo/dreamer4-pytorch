@@ -13,9 +13,12 @@ imagination:
   num_rollouts: 4
 
 train:
-  batch_size: 8
-  max_steps: 10_000
-  checkpoint_every: 1_000
+  batch_size: 32
+  max_steps: 25_000
+  checkpoint_every: 1000
+  checkpoint_keep_last: 5
+  val_every: 1000
+  val_max_batches: 8
   devices: 1
   accelerator: gpu
   precision: bf16-mixed

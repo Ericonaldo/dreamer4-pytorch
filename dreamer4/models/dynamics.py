@@ -242,6 +242,27 @@ def decode_packed_to_images(
 _ROLLOUT_ROW_LABELS = ("gt", "pred")
 
 
+def _tile_time_with_gap(
+    x: torch.Tensor,
+    ctx: int,
+    gap_px: int,
+    *,
+    insert_gap: bool = True,
+    gap_value: float = 0.0,
+) -> torch.Tensor:
+    """(B,T,C,H,W) -> (B,C,H,T*W) with optional gap after ctx frames."""
+    B, T, C, H, W = x.shape
+    y = x.permute(0, 2, 3, 1, 4).contiguous().view(B, C, H, T * W)
+    if insert_gap and gap_px > 0 and 0 < ctx < T:
+        split = ctx * W
+        if split < T * W:
+            left = y[..., :split]
+            right = y[..., split:]
+            gap = torch.full((B, C, H, gap_px), gap_value, device=y.device, dtype=y.dtype)
+            y = torch.cat([left, gap, right], dim=3)
+    return y
+
+
 def _annotate_rollout_panel_rows(panel_hwc: np.ndarray, row_h: int, n_samples: int) -> np.ndarray:
     from PIL import Image, ImageDraw, ImageFont
 
@@ -257,6 +278,135 @@ def _annotate_rollout_panel_rows(panel_hwc: np.ndarray, row_h: int, n_samples: i
             y = s * n_rows * row_h + r * row_h + 2
             draw.text((4, y), label, fill=(255, 255, 255), stroke_width=1, stroke_fill=(0, 0, 0), font=font)
     return np.asarray(img)
+
+
+def _annotate_multictx_panel(
+    panel_hwc: np.ndarray,
+    row_h: int,
+    frame_w: int,
+    ctx_lengths: list[int],
+    n_samples: int,
+    gap_px: int,
+    total_frames: int,
+    *,
+    include_gt_row: bool = True,
+) -> np.ndarray:
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.fromarray(panel_hwc)
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 11)
+    except OSError:
+        font = ImageFont.load_default()
+    max_ctx = ctx_lengths[-1]
+    n_ctx_rows = len(ctx_lengths)
+    rows_per_sample = (1 + n_ctx_rows) if include_gt_row else n_ctx_rows
+    for s in range(n_samples):
+        row_offset = 0
+        if include_gt_row:
+            y0 = s * rows_per_sample * row_h
+            draw.text(
+                (4, y0 + 2),
+                "gt",
+                fill=(255, 255, 255),
+                stroke_width=1,
+                stroke_fill=(0, 0, 0),
+                font=font,
+            )
+            row_offset = 1
+        for r, ctx in enumerate(ctx_lengths):
+            y0 = s * rows_per_sample * row_h + (row_offset + r) * row_h
+            draw.text(
+                (4, y0 + 2),
+                f"ctx={ctx}",
+                fill=(255, 255, 255),
+                stroke_width=1,
+                stroke_fill=(0, 0, 0),
+                font=font,
+            )
+            if ctx <= 0 or ctx >= total_frames:
+                continue
+            ctx_w = ctx * frame_w
+            has_gap = gap_px > 0 and 0 < ctx < total_frames
+            rollout_x = ctx_w + gap_px if has_gap else ctx_w
+            mid_y = y0 + row_h // 2 - 6
+            if ctx_w > 48:
+                draw.text(
+                    (max(4, ctx_w // 2 - 28), mid_y),
+                    "context",
+                    fill=(255, 255, 255),
+                    stroke_width=1,
+                    stroke_fill=(0, 0, 0),
+                    font=font,
+                )
+            if rollout_x + frame_w <= panel_hwc.shape[1]:
+                draw.text(
+                    (rollout_x + 4, mid_y),
+                    "rollout",
+                    fill=(255, 255, 255),
+                    stroke_width=1,
+                    stroke_fill=(0, 0, 0),
+                    font=font,
+                )
+    return np.asarray(img)
+
+
+def rollout_panels_multictx_uint8(
+    gt_bthwc: torch.Tensor,
+    pred_by_ctx_bkthwc: torch.Tensor,
+    ctx_lengths: list[int],
+    max_items: int = 4,
+    gap_px: int = 16,
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    """Combined panel (all trajectories stacked) + one annotated image per trajectory."""
+    B, K, T = pred_by_ctx_bkthwc.shape[:3]
+    gt = gt_bthwc[:, :T]
+    H, W = gt.shape[3], gt.shape[4]
+    Bv = min(B, max_items)
+    max_ctx = int(min(ctx_lengths[-1], T))
+    gt_row = _tile_time_with_gap(
+        gt[:Bv].permute(0, 1, 4, 2, 3),
+        max_ctx,
+        gap_px,
+        insert_gap=gap_px > 0 and 0 < max_ctx < T,
+        gap_value=1.0,
+    )
+    rows = [gt_row]
+    for ki, ctx in enumerate(ctx_lengths):
+        ctx = int(min(ctx, T))
+        composite = gt[:Bv].clone()
+        if ctx < T:
+            composite[:, ctx:] = pred_by_ctx_bkthwc[:Bv, ki, ctx:]
+        row = _tile_time_with_gap(composite.permute(0, 1, 4, 2, 3), ctx, gap_px)
+        rows.append(row)
+    panel = torch.cat(rows, dim=2)
+    per_sample: list[np.ndarray] = []
+    for i in range(Bv):
+        out = (panel[i].clamp(0, 1) * 255.0).permute(1, 2, 0).to(torch.uint8).cpu().numpy()
+        per_sample.append(
+            _annotate_multictx_panel(out, H, W, ctx_lengths, 1, gap_px, T, include_gt_row=True)
+        )
+    big = torch.cat([panel[i] for i in range(Bv)], dim=1)
+    combined = (big.clamp(0, 1) * 255.0).permute(1, 2, 0).to(torch.uint8).cpu().numpy()
+    combined = _annotate_multictx_panel(
+        combined, H, W, ctx_lengths, Bv, gap_px, T, include_gt_row=True
+    )
+    return combined, per_sample
+
+
+def rollout_panel_multictx_uint8(
+    gt_bthwc: torch.Tensor,
+    pred_by_ctx_bkthwc: torch.Tensor,
+    ctx_lengths: list[int],
+    max_items: int = 4,
+    gap_px: int = 16,
+) -> np.ndarray:
+    """Top GT row + rows ctx=1..K: GT context frames, rollout decode for the rest."""
+    combined, _ = rollout_panels_multictx_uint8(
+        gt_bthwc, pred_by_ctx_bkthwc, ctx_lengths, max_items=max_items, gap_px=gap_px
+    )
+    return combined
 
 
 def rollout_panel_uint8(
@@ -276,17 +426,7 @@ def rollout_panel_uint8(
 
     def tile_time(x: torch.Tensor) -> torch.Tensor:
         x = x[:Bv]
-        B_, T_, C_, H_, W_ = x.shape
-        y = x.permute(0, 2, 3, 1, 4).contiguous().view(B_, C_, H_, T_ * W_)
-        if gap_px > 0 and 0 < ctx < T_:
-            split = ctx * W_
-            total_w = T_ * W_
-            if split < total_w:
-                left = y[..., :split]
-                right = y[..., split:]
-                gap = torch.zeros((B_, C_, H_, gap_px), device=y.device, dtype=y.dtype)
-                y = torch.cat([left, gap, right], dim=3)
-        return y
+        return _tile_time_with_gap(x, ctx, gap_px)
 
     gt_t = tile_time(gt)
     pr_t = tile_time(pred)
@@ -312,7 +452,10 @@ def run_dynamics_rollout_eval(
     horizon: int,
     flow_steps: int,
     max_items: int = 4,
-) -> tuple[dict[str, float], np.ndarray, torch.Tensor, torch.Tensor]:
+    return_per_traj: bool = False,
+) -> tuple[dict[str, float], np.ndarray, torch.Tensor, torch.Tensor] | tuple[
+    dict[str, float], np.ndarray, torch.Tensor, torch.Tensor, list[np.ndarray]
+]:
     """
     Action-conditioned rollout eval: replay dataset actions, autoregressive latent prediction (no GT latent
     feedback after context), decode, compare to GT frames and repeat-last-frame baseline.
@@ -351,6 +494,29 @@ def run_dynamics_rollout_eval(
         channels,
     )
 
+    ctx_lengths = list(range(1, ctx_length + 1))
+    pred_by_ctx = []
+    for k in ctx_lengths:
+        z_k = sample_autoregressive_packed_sequence(
+            dynamics,
+            z_gt_packed,
+            actions_eval,
+            k,
+            length - k,
+            flow_steps,
+        )
+        pred_by_ctx.append(
+            decode_packed_to_images(
+                tokenizer,
+                z_k,
+                patch_size,
+                packing_factor,
+                image_size,
+                channels,
+            )
+        )
+    pred_by_ctx_bkthwc = torch.stack(pred_by_ctx, dim=1)
+
     floor = frames.clone()
     if horizon > 0:
         floor[:, ctx_length:ctx_length + horizon] = frames[:, ctx_length - 1:ctx_length].expand(
@@ -375,5 +541,9 @@ def run_dynamics_rollout_eval(
         "rollout_psnr_gain": float((psnr_pred - psnr_floor).detach()),
     }
 
-    panel = rollout_panel_uint8(frames, pred_frames, ctx_length, max_items=max_items)
+    panel, per_traj = rollout_panels_multictx_uint8(
+        frames, pred_by_ctx_bkthwc, ctx_lengths, max_items=max_items
+    )
+    if return_per_traj:
+        return metrics, panel, frames, pred_frames, per_traj
     return metrics, panel, frames, pred_frames

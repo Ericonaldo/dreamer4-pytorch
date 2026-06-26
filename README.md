@@ -4,6 +4,18 @@ Minimal PyTorch Lightning reimplementation of [Dreamer 4](https://arxiv.org/abs/
 
 References: [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4), [edwhu/dreamer4-jax](https://github.com/edwhu/dreamer4-jax).
 
+Network structure
+```
+Tokenizer (frozen) → packed z_t
+Dynamics:
+  inputs: a_t, z_t, agent_t
+  output: h_t
+AgentHeads(h_t):
+  - policy: MLP → (B,T,L,A)  L-step action, MSE
+  - reward: MLP → (B,T,L)
+  - value:  MLP → (B,T)
+```
+
 ## TODO
 
 ### Transformer (vs paper §architecture)
@@ -43,15 +55,15 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [ ] Discrete noise schedule / `k_max` grid (ref uses finest-step flow grid)
 - [x] Agent token slot — `n_agent=1`, zero agent at pretrain, `wm_dynamics` (ref `wm_agent_isolated`); `forward` returns `h_t` for BC
 - [x] `wm_agent` space mask — agent attends world; world/action ignore agent keys
-- [ ] `TaskEmbedder` multi-task (Walker uses `n_tasks=1`)
 - [x] Action-conditioned rollout eval — dataset actions, autoregressive latent sampling, decode, `val/rollout_mse` / PSNR vs floor, wandb viz
 - [x] Dynamics config aligned with tokenizer ckpt (`tokenizer_ckpt`, arch in `dynamics.yaml`)
 
 ### BC (stage 3)
 
-- [x] `BCModel` — dynamics init (`dynamics_ckpt`), `wm_agent`, `TaskEmbedder`, `AgentHeads` (L-step action / reward + value, MSE)
+- [x] `BCModel` — dynamics init (`dynamics_ckpt`), `wm_agent`, learned agent tokens, `AgentHeads` (L-step action / reward + value, MSE)
 - [x] `BCModule` training with frozen tokenizer encode
 - [x] Config `configs/walker_walk/bc.yaml`, smoke `bc_debug.yaml`
+- [ ] `TaskEmbedder` for multi-task BC — skipped for now: only Walker Walk is implemented, so a single learned `agent_tokens` parameter is enough and avoids an extra embedding table with no conditioning signal; add when training multiple tasks on shared weights
 - [ ] Closed-loop L-step rollout BC (policy-fed actions into dynamics)
 - [ ] Config tuning; reward/value targets (returns vs raw reward)
 

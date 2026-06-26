@@ -8,7 +8,6 @@ import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
 
 from dreamer4.models.dynamics import DynamicsModel
-from dreamer4.models.task_embedder import TaskEmbedder
 
 
 def _cfg_dict(cfg: Mapping[str, Any] | DictConfig) -> dict[str, Any]:
@@ -69,7 +68,7 @@ class AgentHeads(nn.Module):
 
 
 class BCModel(nn.Module):
-    """Dynamics backbone (wm_agent) + task agent tokens + BC heads."""
+    """Dynamics backbone (wm_agent) + learned agent tokens + BC heads."""
 
     def __init__(
         self,
@@ -86,12 +85,8 @@ class BCModel(nn.Module):
         self.d_model = int(raw["embed_dim"])
 
         self.dynamics = DynamicsModel(raw, n_latents=n_latents, latent_dim=latent_dim)
-        self.task_embedder = TaskEmbedder(
-            self.d_model,
-            self.n_agent,
-            use_ids=bool(raw.get("use_task_ids", True)),
-            n_tasks=int(raw.get("n_tasks", 1)),
-        )
+        self.agent_tokens = nn.Parameter(torch.empty(self.n_agent, self.d_model))
+        nn.init.normal_(self.agent_tokens, std=0.02)
         heads = _cfg_dict(heads_cfg)
         self.heads = AgentHeads(
             self.d_model,
@@ -106,10 +101,9 @@ class BCModel(nn.Module):
         self,
         packed_z: torch.Tensor,
         actions: torch.Tensor,
-        task_id: torch.Tensor,
     ) -> AgentOutputs:
         B, T = packed_z.shape[:2]
-        agent_tokens = self.task_embedder(task_id, B=B, T=T)
+        agent_tokens = self.agent_tokens.view(1, 1, self.n_agent, self.d_model).expand(B, T, -1, -1)
         sigma = torch.zeros(B, T, device=packed_z.device, dtype=torch.float32)
         _, h_agent = self.dynamics(actions, sigma, packed_z, agent_tokens=agent_tokens)
         if h_agent is None:

@@ -42,7 +42,6 @@ class BCModule(BaseModule):
         self.n_spatial = n_latents // self.packing_factor
         self.patch_size = int(cfg.model.tokenizer.patch_size)
         self.action_horizon = int(cfg.model.get("action_horizon", 8))
-        self.task_id = int(cfg.model.get("task_id", 0))
 
         self.model = BCModel(
             cfg.model.dynamics,
@@ -52,6 +51,10 @@ class BCModule(BaseModule):
         )
         if cfg.get("dynamics_ckpt"):
             _load_state(self.model.dynamics, cfg.dynamics_ckpt, prefix="model.")
+
+        # BC loss only uses agent readout; flow_head is unused and breaks DDP.
+        for p in self.model.dynamics.flow_head.parameters():
+            p.requires_grad_(False)
 
         if cfg.train.get("freeze_dynamics", False):
             for p in self.model.dynamics.parameters():
@@ -73,9 +76,7 @@ class BCModule(BaseModule):
         with torch.no_grad():
             packed_z = self._encode_packed(batch.image)
 
-        B = packed_z.shape[0]
-        task = torch.full((B,), self.task_id, device=packed_z.device, dtype=torch.long)
-        outputs = self.model(packed_z, batch.action, task)
+        outputs = self.model(packed_z, batch.action)
         loss, metrics = self._bc_loss(
             outputs,
             batch.action,

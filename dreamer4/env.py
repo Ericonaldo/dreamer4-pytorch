@@ -1,31 +1,48 @@
-"""DMC environment wrapper.
+"""DMC environment wrapper (embodied-style API).
 
 Adapted from danijar/embodied embodied/envs/dmc.py:
 https://github.com/danijar/embodied/blob/main/embodied/envs/dmc.py
+
+Task names use underscore form, e.g. ``walker_walk`` -> domain ``walker``, task ``walk``.
 """
+
+from __future__ import annotations
 
 import functools
 import os
+import sys
+from pathlib import Path
 
 import elements
-import embodied
 import numpy as np
 from dm_control import manipulation
 from dm_control import suite
 from dm_control.locomotion.examples import basic_rodent_2020
 
-from embodied.envs import from_dm
+# Vendored embodied (ref/embodied) when the package is not installed.
+_REPO_EMBODIED = Path(__file__).resolve().parents[1] / "ref" / "embodied"
+if _REPO_EMBODIED.is_dir() and str(_REPO_EMBODIED) not in sys.path:
+    sys.path.insert(0, str(_REPO_EMBODIED))
+
+import embodied  # noqa: E402
+from embodied.core.wrappers import ActionRepeat  # noqa: E402
+from embodied.envs.from_dm import FromDM  # noqa: E402
 
 
 class DMC(embodied.Env):
-
     DEFAULT_CAMERAS = dict(
         quadruped=2,
         rodent=4,
     )
 
     def __init__(
-        self, env, repeat=1, size=(64, 64), proprio=True, image=True, camera=-1
+        self,
+        env,
+        repeat=1,
+        size=(64, 64),
+        proprio=True,
+        image=True,
+        camera=-1,
     ):
         if "MUJOCO_GL" not in os.environ:
             os.environ["MUJOCO_GL"] = "egl"
@@ -33,21 +50,17 @@ class DMC(embodied.Env):
             domain, task = env.split("_", 1)
             if camera == -1:
                 camera = self.DEFAULT_CAMERAS.get(domain, 0)
-            if domain == "cup":  # Only domain with multiple words.
+            if domain == "cup":
                 domain = "ball_in_cup"
             if domain == "manip":
                 env = manipulation.load(task + "_vision")
             elif domain == "rodent":
-                # camera 0: topdown map
-                # camera 2: shoulder
-                # camera 4: topdown tracking
-                # camera 5: eyes
                 env = getattr(basic_rodent_2020, task)()
             else:
                 env = suite.load(domain, task)
         self._dmenv = env
-        self._env = from_dm.FromDM(self._dmenv)
-        self._env = embodied.wrappers.ActionRepeat(self._env, repeat)
+        self._env = FromDM(self._dmenv)
+        self._env = ActionRepeat(self._env, repeat)
         self._size = size
         self._proprio = proprio
         self._image = image
@@ -81,3 +94,52 @@ class DMC(embodied.Env):
             if np.issubdtype(space.dtype, np.floating):
                 assert np.isfinite(obs[key]).all(), (key, obs[key])
         return obs
+
+
+class DMCEnvAdapter:
+    """Thin adapter: ``reset()`` / ``step(np.ndarray)`` for policy eval scripts."""
+
+    def __init__(self, env: DMC, *, max_episode_steps: int | None = None):
+        self._env = env
+        self._max_episode_steps = max_episode_steps
+        self._step_count = 0
+        self._action_key = "action"
+        space = env.act_space[self._action_key]
+        self.action_dim = int(np.prod(space.shape))
+        self._zero_action = np.zeros(space.shape, dtype=np.float32)
+
+    def reset(self) -> dict:
+        self._step_count = 0
+        return self._env.step({"reset": True, self._action_key: self._zero_action.copy()})
+
+    def step(self, action: np.ndarray) -> dict:
+        obs = self._env.step(
+            {"reset": False, self._action_key: np.asarray(action, dtype=np.float32)}
+        )
+        if not obs["is_first"]:
+            self._step_count += 1
+        if self._max_episode_steps is not None and self._step_count >= self._max_episode_steps:
+            obs["is_last"] = True
+        return obs
+
+
+def make_dmc_env(
+    task: str = "walker_walk",
+    *,
+    repeat: int = 2,
+    image_size: int = 64,
+    proprio: bool = False,
+    image: bool = True,
+    camera: int = -1,
+    max_episode_steps: int | None = 1000,
+) -> DMCEnvAdapter:
+    """Build DMC env for online eval. ``task`` is e.g. ``walker_walk``."""
+    core = DMC(
+        task,
+        repeat=repeat,
+        size=(image_size, image_size),
+        proprio=proprio,
+        image=image,
+        camera=camera,
+    )
+    return DMCEnvAdapter(core, max_episode_steps=max_episode_steps)

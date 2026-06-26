@@ -108,7 +108,7 @@ class DynamicsModule(BaseModule):
         iio.imwrite(viz_path, panel)
 
         caption = (
-            f"rows=GT/Pred | ctx={self.rollout_ctx} | horizon={self.rollout_horizon} | "
+            f"rows=gt+ctx=1..{self.rollout_ctx} | horizon={self.rollout_horizon} | "
             f"psnr_gain={metrics['rollout_psnr_gain']:.2f}"
         )
         for logger in self.trainer.loggers:

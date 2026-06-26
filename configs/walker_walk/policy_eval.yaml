@@ -1,0 +1,11 @@
+# Policy eval defaults (merge with configs/walker_walk/bc.yaml)
+eval:
+  task: walker_walk
+  image_size: 64
+  action_repeat: 2
+  max_episode_steps: 1000
+  max_history: 32
+  camera_id: -1
+  proprio: false
+  image: true
+  episodes: 50

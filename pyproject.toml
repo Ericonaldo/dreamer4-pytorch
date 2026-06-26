@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["ruff>=0.8.0"]
 lpips = ["lpips>=0.1.4"]
+dmc = ["dm-control>=1.0.14", "elements>=3.17.0"]
 
 [dependency-groups]
 dev = ["ruff>=0.8.0"]
