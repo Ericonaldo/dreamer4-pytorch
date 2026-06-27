@@ -35,6 +35,12 @@ def main() -> None:
         action="store_true",
         help="Overlay step labels (and return on last frame) on --video-out mp4",
     )
+    parser.add_argument(
+        "--action-horizon",
+        type=int,
+        default=None,
+        help="Open-loop MTP steps per replan (1=closed-loop from current obs; default eval.action_horizon)",
+    )
     parser.add_argument("--task", type=str, default=None, help="DMC task name, e.g. walker_walk")
     parser.add_argument("overrides", nargs="*", help="Config overrides")
     args = parser.parse_args()
@@ -48,6 +54,8 @@ def main() -> None:
         cfg.bc_ckpt = str(args.bc_ckpt)
     if args.task is not None:
         cfg.eval.task = args.task
+    if args.action_horizon is not None:
+        cfg.eval.action_horizon = int(args.action_horizon)
 
     eval_cfg = cfg.get("eval", {})
     episodes = int(args.episodes or eval_cfg.get("episodes", 10))

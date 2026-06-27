@@ -4,17 +4,55 @@ Minimal PyTorch Lightning reimplementation of [Dreamer 4](https://arxiv.org/abs/
 
 References: [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4), [edwhu/dreamer4-jax](https://github.com/edwhu/dreamer4-jax), [lucidrains/dreamer4](https://github.com/lucidrains/dreamer4).
 
-Network structure
+## Training stages
 
-Symbols: `B` batch, `T` aligned timesteps (= raw obs length), `A=6` action dim, `L=8` MTP horizon, `D` dynamics `embed_dim`, `L_z=16` tokenizer latents, `D_z=32` latent dim, `k=2` packing factor, `S_sp=L_z/k=8` spatial slots, `D_sp=D_z·k=64`, `R=4` register tokens, `N=1` agent token, `P=(H/patch)²` image patches.
+Three-stage pipeline (paper-aligned); configs under `configs/walker_walk/`:
 
-**Tokenizer** (frozen encode):
+| Stage | Name | What trains | Config (this repo) |
+|-------|------|-------------|-------------------|
+| **1** | **Tokenizer** | Causal patch **encoder + decoder**; block-causal transformer with **MAE** random patch masking → latent bottleneck `z_t` + recon loss | `tokenizer.yaml`, `tokenizer_5m.yaml` |
+| **2** | **Pretraining** | **BC + dynamics** on frozen tokenizer encode: joint **flow matching** (`wm_dynamics`) and **BC** action/reward MTP (`wm_agent`) on one backbone; optional `dynamics.yaml` warm start | `bc_dynamics.yaml`, `bc_dynamics_10m.yaml` (also `bc.yaml` for BC-only finetune) |
+| **3** | **Posttraining** | **RL** in latent imagination: rollout with learned dynamics + policy, value head on TD(λ) returns (not BC MTP) | `policy.yaml` *(planned)* |
+
+Stage 1 decoder is dropped at inference for downstream stages (encode-only). Stage 3 uses imagined trajectories, not dataset BC labels.
+
+## Network structure
+
+Symbols: `B` batch, `T` aligned timesteps, `A=6` action dim, `L=8` MTP horizon, `D` dynamics `embed_dim`, `L_z=16` tokenizer latents, `D_z=32` latent dim, `k=2` packing factor, `S_sp=L_z/k=8` spatial slots, `D_sp=D_z·k=64`, `R=4` register tokens, `N=1` agent token, `P=(H/patch)²` image patches.
+
+**Time alignment** (`GranularEpisodeDataset` → `align_dynamics_batch` in `data.py`):
+
+| Stage | `window_mode` | Raw window from dataset | Model batch |
+|-------|---------------|-------------------------|-------------|
+| Tokenizer | `frame` | `seq_len` consecutive frames | `image (B,T,H,W,C)` — one frame per step is typical |
+| Dynamics / BC / bc_dynamics | `transition` | obs `[s0..sT]` (**T+1** frames), actions `[a1..aT]`, rewards `[r1..rT]` (**T** transitions) | see table below |
+
+Dreamer transition: `s_{t-1} -- a_t --> s_t`, reward `r_t` labels the step into `s_t`.  
+`align_dynamics_batch` prepends **NULL** action/reward at `t=0` so every row shares the same index as the observation:
+
+| time `t` | observation | action input `a_t` | reward `r_t` | latent |
+|----------|-------------|--------------------|--------------|--------|
+| 0 | s₀ | **0** (NULL) | **0** | z̄₀ ← encode(s₀) |
+| ≥1 | s_t | a_t (action that led to s_t) | r_t | z̄_t ← encode(s_t) |
+
+Aligned shapes passed to dynamics / BC: `image (B,T,H,W,C)`, `action (B,T,A)`, `reward (B,T)` with **`T = seq_len + 1`**.
+
+**Tokenizer** — **encoder** frozen after stage 1; encodes observations for dynamics / BC. **Decoder** used only in tokenizer training and when decoding latents back to pixels (recon viz, rollout eval); not used on the BC env loop.
+
+Encoder (frozen encode → dynamics / BC):
 ```
 s_t  (B,T,H,W,C)
   → patches (B,T,P,patch_dim)
   → per-timestep tokens [latent×L_z | patch×P]  (B,T,L_z+P,D_tok)
   → z_t  (B,T,L_z,D_z)
   → pack → z̄_t  (B,T,S_sp,D_sp)     # group k latents per spatial slot
+```
+
+Decoder (tokenizer train + decode video only):
+```
+z_t  (B,T,L_z,D_z)
+  → up-proj latents + patch queries → decoder transformer
+  → patch logits → ŝ_t  (B,T,H,W,C)   MAE recon loss at train; rollout / viz decode
 ```
 
 **Dynamics** (`DynamicsModel.forward`):
@@ -35,7 +73,7 @@ Per timestep t, build spatial token sequence (dim S = 2+S_sp+R+N = 15 by default
     agent out   → h_t (B,T,N,D)         BC readout slot
 ```
 
-**BC** (`BCModel`):
+**BC** (`BCModel`, stage `bc` or heads-only finetune):
 ```
 h = mean(h_t, dim agent)  (B,T,D)
 AgentHeads(h):
@@ -43,20 +81,27 @@ AgentHeads(h):
   reward  → symexp twohot MLP  (B,T,L)     MTP slot ℓ predicts r_{t+ℓ}, twohot CE
 ```
 
-Data token order
+**BC + dynamics** (`bc_dynamics` stage, `BCDynamicsModule` — config `bc_dynamics.yaml`):
+```
+Same shared backbone (BCModel.dynamics + learned agent_tokens + AgentHeads).
+Frozen tokenizer encode once → packed_z, action, reward.
 
-**Tokenizer** (`window_mode=frame`): one frame per sample; batch as `(B,1,H,W,C)`.
+Two forwards per step, different space attention masks (space_modes: [wm_dynamics, wm_agent]):
 
-**Dynamics / BC** (`window_mode=transition`, after `align_dynamics_batch`):
+  1) flow (space_mode=wm_dynamics)
+     σ_t ~ Uniform(0,1) per (B,T); agent_t present but isolated (world ignores agent keys)
+     → flow head x̂₁ vs clean z̄_t
+     loss_flow = MSE(x̂₁, z̄_t)
 
-| time | observation | action input `a_t` | reward target `r_t` | latent |
-|------|-------------|--------------------|---------------------|--------|
-| t=0 | frame s₀ | **0** (NULL) | **0** | z̄₀ from s₀ |
-| t≥1 | frame s_t | a_t (action that produced s_t) | r_t | z̄_t from s_t |
+  2) BC (space_mode=wm_agent)
+     σ_t = 0; agent_t attends world (spatial/register/action/noise)
+     → h_t → AgentHeads → bc_loss (action NLL + reward twohot CE)
 
-Aligned batch shapes: `image (B,T,H,W,C)`, `action (B,T,A)`, `reward (B,T)` with `T = #transitions + 1` (see table).
+  loss = flow_weight · loss_flow + bc_loss
 
-Dataset raw (transition): `obs [s0..s_{T-1}]` (T frames), `actions [a1..a_{T-1}]`, `rewards [r1..r_{T-1}]` (T−1 transitions).
+BC-only stage (`bc`) uses wm_agent only; dynamics-only pretrain uses wm_dynamics with agent_t = 0.
+Optional warm start: dynamics_ckpt from stage 2, then joint train flow + BC heads together.
+```
 
 ## TODO
 
@@ -93,8 +138,7 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [x] `DynamicsModel` — action + noise-conditioned flow on packed tokenizer latents
 - [x] Simple flow-matching loss (empirical MSE on clean latents, no shortcut/bootstrap)
 - [x] `DynamicsModule` training with frozen tokenizer encode
-- [ ] Shortcut forcing + bootstrap self-consistency loss (ref `dynamics_pretrain_loss` self branch)
-- [ ] Discrete noise schedule / `k_max` grid (ref uses finest-step flow grid)
+- [ ] Shortcut forcing + bootstrap self-consistency loss (ref `dynamics_pretrain_loss` self branch); Discrete noise schedule / `k_max` grid (ref uses finest-step flow grid)
 - [x] Agent token slot — `n_agent=1`, zero agent at pretrain, `wm_dynamics` (ref `wm_agent_isolated`); `forward` returns `h_t` for BC
 - [x] `wm_agent` space mask — agent attends world; world/action ignore agent keys
 - [x] Action-conditioned rollout eval — dataset actions, autoregressive latent sampling, decode, `val/rollout_mse` / PSNR vs floor, wandb viz
@@ -108,8 +152,6 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [x] `BCDynamicsModule` — joint flow + BC on shared backbone (`bc_dynamics.yaml`)
 - [x] Config `configs/walker_walk/bc.yaml`, `bc_dynamics.yaml`
 - [ ] ~`TaskEmbedder` for multi-task BC — skipped for now: only Walker Walk is implemented, so a single learned `agent_tokens` parameter is enough and avoids an extra embedding table with no conditioning signal; add when training multiple tasks on shared weights~
-- [ ] Closed-loop L-step rollout BC (policy-fed actions into dynamics)
-- [ ] Config tuning (loss weights, `reward_bins`, etc.)
 - [ ] **Reward MTP readout switch (config)** — selectable via YAML, not implemented yet:
   - `symexp_twohot` (current): `SymExpTwoHotHead` + twohot CE; raw rewards from dataloader, **no norm**
   - `mse`: simple MLP → scalar `(B,T,L)` + MSE on L-step future rewards; **normalize rewards in dataloader** (e.g. running mean/std or fixed scale in `data` / `train` config); denorm for metrics only
@@ -125,7 +167,6 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 
 - [ ] `data.obs_mode=proprio` / `both` paths through dynamics & policy (tokenizer is image-only today)
 - [x] DMC online env eval (`env.py` + `policy_agent.py`; CLI `dreamer4-eval`, training `AsyncBCEval`)
-- [ ] Git initial commit & CI smoke test
 
 ## Setup
 
@@ -146,14 +187,13 @@ Place the dataset at `data/dmc_walker_walk/`.
 
 ## Training pipeline
 
-Four stages, each driven by a YAML config under `configs/walker_walk/`:
+See **Training stages** above. Runnable configs:
 
-| Stage | Config | Description |
-|-------|--------|-------------|
-| 1 | `tokenizer.yaml` | Causal patch tokenizer |
-| 2 | `dynamics.yaml` | Interactive dynamics model |
-| 3 | `bc.yaml` / `bc_dynamics.yaml` | BC policy + reward heads (action + reward MTP) |
-| 4 | `policy.yaml` | Imagination RL on top of BC |
+| Stage | Config | Notes |
+|-------|--------|-------|
+| 1 Tokenizer | `tokenizer.yaml`, `tokenizer_5m.yaml` | MAE encoder–decoder |
+| 2 Pretraining | `bc_dynamics.yaml`, `bc_dynamics_10m.yaml` | Joint flow + BC; optional `dynamics.yaml` init |
+| 3 Posttraining | `policy.yaml` | Imagination RL *(planned)* |
 
 ```bash
 # Full model
@@ -240,7 +280,7 @@ uv run python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yam
 
 ### BC policy eval (online DMC)
 
-CLI: `dreamer4-eval` (`dreamer4/eval_policy.py`) — thin wrapper over `dreamer4/policy_agent.py` (`BCPolicy`, `run_bc_env_eval`, `AsyncBCEval`). Merges `configs/walker_walk/policy_eval.yaml` when present (`max_history: 16`, `episodes: 50`, `num_envs: 8`). BC policy uses **MTP slot 1** (`a_{t+1}`) as the env action.
+CLI: `dreamer4-eval` (`dreamer4/eval_policy.py`) — thin wrapper over `dreamer4/policy_agent.py` (`BCPolicy`, `run_bc_env_eval`, `AsyncBCEval`). Merges `configs/walker_walk/policy_eval.yaml` when present (`max_history: 16`, `episodes: 50`, `num_envs: 8`). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan from current obs each step, MTP slot 1); **L>1** = execute MTP slots `1..L` without re-encoding before the next replan (capped by `model.action_horizon - 1`).
 
 **Multi-GPU**: `--gpus 8` splits 50 episodes across 8 GPUs; each GPU runs `eval.num_envs` parallel envs (8 in `bc_dynamics_10m.yaml`).
 

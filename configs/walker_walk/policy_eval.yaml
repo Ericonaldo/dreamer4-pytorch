@@ -5,6 +5,8 @@ eval:
   action_repeat: 1
   max_episode_steps: 1000
   max_history: 16
+  # Open-loop env steps per model forward (MTP slots 1..L). 1 = replan each step.
+  action_horizon: 1
   camera_id: -1
   proprio: false
   image: true

@@ -122,6 +122,14 @@ class RandomPolicy:
         return np.random.uniform(-1.0, 1.0, size=(self.action_dim,)).astype(np.float32)
 
 
+def resolve_eval_action_horizon(cfg: DictConfig) -> int:
+    """Open-loop env steps per model forward; 1 = replan from current obs each step."""
+    model_h = int(cfg.model.get("action_horizon", 8))
+    eval_h = int(cfg.get("eval", {}).get("action_horizon", 1))
+    # MTP slot l predicts a_{t+l}; after observing s_t use slots 1..L for env steps.
+    return max(1, min(eval_h, model_h - 1))
+
+
 class BCPolicy:
     """Online BC agent with optional batched env slots (encode → BCModel → MTP action)."""
 
@@ -139,6 +147,7 @@ class BCPolicy:
         self.patch_size = int(cfg.model.tokenizer.patch_size)
         self.max_history = int(cfg.eval.get("max_history", 16))
         self.action_dim = int(cfg.model.dynamics.action_dim)
+        self.open_loop_steps = resolve_eval_action_horizon(cfg)
 
         if model is None or tokenizer is None:
             self.model, self.tokenizer = load_bc_modules(cfg, device)
@@ -152,6 +161,8 @@ class BCPolicy:
 
         self._z: list[list[torch.Tensor]] = [[] for _ in range(self.num_envs)]
         self._a: list[list[torch.Tensor]] = [[] for _ in range(self.num_envs)]
+        self._pending: list[list[np.ndarray]] = [[] for _ in range(self.num_envs)]
+        self._last_executed: list[np.ndarray | None] = [None] * self.num_envs
 
     def reset(self, ids: list[int] | None = None) -> None:
         if ids is None:
@@ -159,6 +170,61 @@ class BCPolicy:
         for i in ids:
             self._z[i].clear()
             self._a[i].clear()
+            self._pending[i].clear()
+            self._last_executed[i] = None
+
+    def _push_action(self, slot: int, action: np.ndarray) -> None:
+        self._a[slot].append(torch.from_numpy(action.astype(np.float32)).to(self.device))
+        if len(self._a[slot]) > self.max_history:
+            self._a[slot].pop(0)
+
+    def _commit_last_action(self, ids: list[int]) -> None:
+        """Record the last env action before appending a new replan observation."""
+        for i in ids:
+            if self._z[i] and self._last_executed[i] is not None:
+                self._push_action(i, self._last_executed[i])
+                self._last_executed[i] = None
+
+    def _aligned_actions(self, slot: int, t: int) -> torch.Tensor:
+        """(t, A) with a_0=0; a_k is the action into z_k for replan-aligned history."""
+        out = torch.zeros(t, self.action_dim, device=self.device)
+        n_transitions = min(len(self._a[slot]), max(0, t - 1))
+        if n_transitions > 0:
+            a_hist = torch.stack(self._a[slot][-n_transitions:], dim=0)
+            out[1 : 1 + n_transitions] = a_hist
+        return out
+
+    def _encode_and_append(self, images: np.ndarray, ids: list[int]) -> None:
+        self._commit_last_action(ids)
+        imgs = (
+            torch.from_numpy(np.ascontiguousarray(images))
+            .to(self.device)
+            .float()
+            .div_(255.0)
+            .unsqueeze(1)
+        )
+        z = encode_images(self.tokenizer, imgs, self.patch_size)
+        packed = pack_bottleneck_to_spatial(z, self.n_spatial, self.packing_factor)[:, 0]
+        for j, i in enumerate(ids):
+            self._z[i].append(packed[j])
+            if len(self._z[i]) > self.max_history:
+                self._z[i].pop(0)
+                if self._a[i]:
+                    self._a[i].pop(0)
+
+    def _forward_mtp_actions(self, ids: list[int]) -> np.ndarray:
+        z_seqs, a_seqs = [], []
+        for i in ids:
+            z_seq = torch.stack(self._z[i], dim=0)
+            z_seqs.append(z_seq)
+            a_seqs.append(self._aligned_actions(i, z_seq.shape[0]))
+
+        z_batch = _pad_stack(z_seqs)
+        a_batch = _pad_stack(a_seqs)
+        outputs = self.model(z_batch, a_batch)
+        # Slots 1..L predict a_{t+1}..a_{t+L} for open-loop env steps after observing s_t.
+        end = 1 + self.open_loop_steps
+        return outputs.action[:, -1, 1:end].float().cpu().numpy().astype(np.float32)
 
     @torch.no_grad()
     def act(self, images: np.ndarray, ids: list[int] | None = None) -> np.ndarray:
@@ -167,43 +233,30 @@ class BCPolicy:
             images = images[np.newaxis, ...]
             ids = [0]
 
-        imgs = torch.from_numpy(np.ascontiguousarray(images)).to(self.device).float().div_(255.0).unsqueeze(1)
-        z = encode_images(self.tokenizer, imgs, self.patch_size)
-        packed = pack_bottleneck_to_spatial(z, self.n_spatial, self.packing_factor)[:, 0]
-
+        actions_out: dict[int, np.ndarray] = {}
+        need_forward: list[int] = []
         for j, i in enumerate(ids):
-            self._z[i].append(packed[j])
-            if len(self._z[i]) > self.max_history:
-                self._z[i].pop(0)
-                if self._a[i]:
-                    self._a[i].pop(0)
-
-        z_seqs, a_seqs = [], []
-        for i in ids:
-            z_seq = torch.stack(self._z[i], dim=0)
-            t = z_seq.shape[0]
-            if self._a[i]:
-                a_hist = torch.stack(self._a[i], dim=0)
-                if a_hist.shape[0] < t:
-                    pad = torch.zeros(t - a_hist.shape[0], self.action_dim, device=self.device)
-                    a_hist = torch.cat([a_hist, pad], dim=0)
+            if self._pending[i]:
+                action = self._pending[i].pop(0)
+                self._last_executed[i] = action
+                actions_out[i] = action
             else:
-                a_hist = z_seq.new_zeros(t, self.action_dim)
-            z_seqs.append(z_seq)
-            a_seqs.append(a_hist)
+                need_forward.append(i)
 
-        z_batch = _pad_stack(z_seqs)
-        a_batch = _pad_stack(a_seqs)
-        outputs = self.model(z_batch, a_batch)
-        # MTP slot 1 = a_{t+1} for the env step after observing current frame. a_{t} is always empty
-        actions = outputs.action[:, -1, 1].float().cpu().numpy().astype(np.float32)
+        if need_forward:
+            fwd_idx = [j for j, i in enumerate(ids) if i in need_forward]
+            self._encode_and_append(images[fwd_idx], need_forward)
+            mtp = self._forward_mtp_actions(need_forward)
+            for j, i in enumerate(need_forward):
+                step_actions = mtp[j]
+                first = step_actions[0]
+                self._last_executed[i] = first
+                actions_out[i] = first
+                if step_actions.shape[0] > 1:
+                    self._pending[i].extend(step_actions[1:])
 
-        for j, i in enumerate(ids):
-            self._a[i].append(torch.from_numpy(actions[j]).to(self.device))
-            if len(self._a[i]) > self.max_history:
-                self._a[i].pop(0)
-
-        return actions[0] if single else actions
+        ordered = np.stack([actions_out[i] for i in ids], axis=0)
+        return ordered[0] if single else ordered
 
 
 def run_episodes(env, policy, num_episodes: int) -> list[EpisodeStats]:
@@ -356,6 +409,7 @@ def run_bc_env_eval(
 ) -> dict[str, float]:
     """Multi-GPU eval: split episodes across GPUs, batched envs per GPU."""
     episodes = int(num_episodes or cfg.get("eval", {}).get("episodes", 10))
+    action_horizon = resolve_eval_action_horizon(cfg)
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
 
     if model_state is not None:
@@ -376,7 +430,9 @@ def run_bc_env_eval(
             model_state=model_state,
             tokenizer_state=tokenizer_state,
         )
-        return summarize_episodes(stats)
+        metrics = summarize_episodes(stats)
+        metrics["action_horizon"] = float(action_horizon)
+        return metrics
 
     ctx = get_context("spawn")
     out_queue = ctx.Queue()
@@ -396,7 +452,9 @@ def run_bc_env_eval(
         all_stats.extend(out_queue.get())
     for p in procs:
         p.join()
-    return summarize_episodes(all_stats)
+    metrics = summarize_episodes(all_stats)
+    metrics["action_horizon"] = float(action_horizon)
+    return metrics
 
 
 def run_bc_policy_video(
