@@ -173,6 +173,33 @@ class SquashedGaussianHead(nn.Module):
         log_prob = log_prob - torch.log(1.0 - actions.pow(2) + self.eps).sum(dim=-1)
         return log_prob
 
+    def sample(
+        self, h_t: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Stochastic squashed action + log prob; MTP slot 0 env action (B, T, A)."""
+        _, mean_u, log_std = self.forward(h_t)
+        std = log_std.exp()
+        u = mean_u + std * torch.randn_like(mean_u)
+        action = torch.tanh(u)
+        log_prob = self.log_prob(mean_u, log_std, action)
+        return action, log_prob, mean_u, log_std
+
+    def gaussian_kl(
+        self,
+        mean_u: torch.Tensor,
+        log_std: torch.Tensor,
+        mean_u_prior: torch.Tensor,
+        log_std_prior: torch.Tensor,
+    ) -> torch.Tensor:
+        """KL between diagonal Gaussians in pre-tanh space; sum over action dims."""
+        var = (log_std.exp()) ** 2
+        var_prior = (log_std_prior.exp()) ** 2
+        return 0.5 * (
+            2 * (log_std_prior - log_std)
+            + (var + (mean_u - mean_u_prior).pow(2)) / var_prior
+            - 1
+        ).sum(dim=-1)
+
 
 class ActionEncoder(nn.Module):
     """Continuous actions (B,T,A) -> single token (B,T,1,D)."""
@@ -284,8 +311,14 @@ class BCModel(nn.Module):
         self.d_model = int(raw["embed_dim"])
 
         self.dynamics = DynamicsModel(raw, n_latents=n_latents, latent_dim=latent_dim)
-        self.bc_space_mode = str(raw.get("bc_space_mode", "wm_agent"))
-        self.dynamics_space_mode = str(raw.get("dynamics_space_mode", raw.get("space_mode", "wm_dynamics")))
+        modes = set(self.dynamics.space_modes)
+        if {"wm_dynamics", "wm_agent"}.issubset(modes):
+            default_dyn, default_bc = "wm_dynamics", "wm_agent"
+        else:
+            default_dyn = self.dynamics.space_mode
+            default_bc = "wm_agent" if "wm_agent" in modes else self.dynamics.space_mode
+        self.dynamics_space_mode = str(raw.get("dynamics_space_mode", default_dyn))
+        self.bc_space_mode = str(raw.get("bc_space_mode", default_bc))
         self.agent_tokens = nn.Parameter(torch.empty(self.n_agent, self.d_model))
         nn.init.normal_(self.agent_tokens, std=0.02)
         heads = _cfg_dict(heads_cfg)
@@ -302,13 +335,14 @@ class BCModel(nn.Module):
             log_std_max=float(heads.get("log_std_max", 2.0)),
         )
 
-    def forward(
+    def agent_hidden(
         self,
         packed_z: torch.Tensor,
         actions: torch.Tensor,
         *,
         space_mode: Optional[str] = None,
-    ) -> AgentOutputs:
+    ) -> torch.Tensor:
+        """Pooled agent hidden states (B, T, d_model) from clean latents and actions."""
         B, T = packed_z.shape[:2]
         agent_tokens = self.agent_tokens.view(1, 1, self.n_agent, self.d_model).expand(B, T, -1, -1)
         sigma = torch.zeros(B, T, device=packed_z.device, dtype=torch.float32)
@@ -321,7 +355,16 @@ class BCModel(nn.Module):
         )
         if h_agent is None:
             raise ValueError("BCModel requires n_agent > 0 on dynamics backbone")
-        h_t = h_agent.mean(dim=2)
+        return h_agent.mean(dim=2)
+
+    def forward(
+        self,
+        packed_z: torch.Tensor,
+        actions: torch.Tensor,
+        *,
+        space_mode: Optional[str] = None,
+    ) -> AgentOutputs:
+        h_t = self.agent_hidden(packed_z, actions, space_mode=space_mode)
         return self.heads(h_t)
 
 
@@ -387,3 +430,98 @@ def bc_loss(
         "action_out_abs_mean": float(outputs.action.abs().float().mean().detach()),
     }
     return loss, metrics
+
+
+def td_lambda_returns(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    gamma: float,
+    lambda_: float,
+) -> torch.Tensor:
+    """
+    TD-λ returns on imagined rewards (Walker: no terminal mask, c_t = 1).
+
+    rewards: (B, H) predicted r_1..r_H
+    values:  (B, H+1) value estimates v_0..v_H
+    """
+    B, H = rewards.shape
+    returns = torch.zeros_like(rewards)
+    g_next = values[:, -1]
+    for t in reversed(range(H)):
+        v_next = values[:, t + 1]
+        g_next = rewards[:, t] + gamma * ((1.0 - lambda_) * v_next + lambda_ * g_next)
+        returns[:, t] = g_next
+    return returns
+
+
+def pmpo_policy_loss(log_prob: torch.Tensor, advantages: torch.Tensor, alpha: float) -> torch.Tensor:
+    """PMPO: sign-only advantages; alpha balances positive vs negative action sets."""
+    flat_lp = log_prob.reshape(-1)
+    flat_adv = advantages.reshape(-1)
+    mask_pos = flat_adv >= 0
+    mask_neg = flat_adv < 0
+    n_pos = mask_pos.sum().clamp_min(1)
+    n_neg = mask_neg.sum().clamp_min(1)
+    loss_neg = (1.0 - alpha) * (flat_lp * mask_neg).sum() / n_neg
+    loss_pos = -alpha * (flat_lp * mask_pos).sum() / n_pos
+    return loss_neg + loss_pos
+
+
+def imagination_rl_loss(
+    hidden: torch.Tensor,
+    imagined_actions: torch.Tensor,
+    imagined_log_prob: torch.Tensor,
+    heads: AgentHeads,
+    policy_prior: SquashedGaussianHead,
+    value_head: SymExpTwoHotHead,
+    *,
+    gamma: float,
+    lambda_: float,
+    alpha: float,
+    beta: float,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """
+    Value CE on TD-λ targets + PMPO policy loss + KL(π || π_BC) on imagined trajectories.
+
+    hidden: (B, H+1, D) agent states s_0..s_H (s_0 = last context state)
+    imagined_actions: (B, H, A) policy actions a_1..a_H
+    imagined_log_prob: (B, H) log π(a_t | s_{t-1})
+    """
+    h = hidden.detach()
+    H = imagined_actions.shape[1]
+
+    reward_logits = heads.reward_head(h[:, 1:])
+    reward_slot0 = reward_logits[:, :, 0]
+    rewards = heads.reward_head.decode(reward_slot0)
+
+    val_logits = value_head(h)
+    values = value_head.decode(val_logits)
+
+    td_returns = td_lambda_returns(rewards, values, gamma, lambda_)
+    val_loss = value_head.loss(val_logits[:, :-1], td_returns).mean()
+
+    advantages = (td_returns - values[:, :-1]).detach()
+    pi_loss = pmpo_policy_loss(imagined_log_prob, advantages, alpha)
+
+    h_pi = h[:, :H]
+    _, mean_u, log_std = heads.policy(h_pi)
+    _, mean_u_bc, log_std_bc = policy_prior(h_pi)
+    kl = heads.policy.gaussian_kl(
+        mean_u[:, :, 0],
+        log_std[:, :, 0],
+        mean_u_bc[:, :, 0],
+        log_std_bc[:, :, 0],
+    ).mean()
+    kl_loss = beta * kl
+
+    total = val_loss + pi_loss + kl_loss
+    metrics = {
+        "val_loss": float(val_loss.detach()),
+        "pi_loss": float(pi_loss.detach()),
+        "pi_kl_loss": float(kl_loss.detach()),
+        "mean_advantage": float(advantages.mean().detach()),
+        "mean_td_return": float(td_returns.mean().detach()),
+        "mean_reward_pred": float(rewards.mean().detach()),
+        "mean_value": float(values.mean().detach()),
+    }
+    return total, metrics

@@ -6,7 +6,7 @@ import torch
 from lightning.pytorch.utilities import rank_zero_warn
 from omegaconf import DictConfig
 
-from dreamer4.bc_env_eval import AsyncBCEval
+from dreamer4.policy_agent import AsyncBCEval
 from dreamer4.data import align_dynamics_batch
 from dreamer4.modules.base import BaseModule
 
@@ -105,6 +105,10 @@ class BCModule(BaseModule):
         if self.trainer.is_global_zero:
             self._env_eval.poll(self)
 
+    def on_train_end(self) -> None:
+        if self.trainer.is_global_zero:
+            self._env_eval.drain(self)
+
     def on_validation_epoch_end(self) -> None:
         if not self.trainer.is_global_zero:
             return
@@ -112,7 +116,7 @@ class BCModule(BaseModule):
         if not eval_cfg.get("env_eval", True):
             return
         try:
-            from dreamer4.bc_env_eval import run_bc_env_eval  # noqa: F401
+            from dreamer4.env import make_dmc_env  # noqa: F401
         except ImportError as exc:
             rank_zero_warn(f"Skipping BC env eval (install dreamer4[dmc]): {exc}")
             return

@@ -66,7 +66,7 @@ from typing import Any
 import imageio.v3 as iio
 import numpy as np
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
 from dreamer4.config import load_config
@@ -218,6 +218,19 @@ def _load_rollout_batch(
     return batch, None
 
 
+def _dynamics_model_cfg(cfg: DictConfig) -> tuple[dict[str, Any], int, str]:
+    """DynamicsModel kwargs, packing_factor, checkpoint state_dict prefix."""
+    if cfg.model.get("dynamics") is not None and "embed_dim" in cfg.model.dynamics:
+        dyn = OmegaConf.to_container(cfg.model.dynamics, resolve=True)
+        pf = int(cfg.model.dynamics.get("packing_factor", 1))
+        stage = str(cfg.get("stage", ""))
+        prefix = "model.dynamics." if stage in ("bc", "bc_dynamics", "policy") else "model."
+        return dyn, pf, prefix
+    raw = OmegaConf.to_container(cfg.model, resolve=True)
+    pf = int(cfg.model.get("packing_factor", 1))
+    return raw, pf, "model."
+
+
 def _build_models(cfg: DictConfig, dynamics_ckpt: Path, device: torch.device):
     tokenizer = build_tokenizer(cfg.model.tokenizer)
     if cfg.get("tokenizer_ckpt"):
@@ -228,14 +241,14 @@ def _build_models(cfg: DictConfig, dynamics_ckpt: Path, device: torch.device):
 
     n_latents = tokenizer.encoder.n_latents
     latent_dim = tokenizer.encoder.bottleneck_proj.out_features
-    packing_factor = int(cfg.model.get("packing_factor", 1))
+    dyn_cfg, packing_factor, ckpt_prefix = _dynamics_model_cfg(cfg)
     n_spatial = n_latents // packing_factor
     patch_size = int(cfg.model.tokenizer.patch_size)
     image_size = int(cfg.model.tokenizer.image_size)
     channels = int(cfg.model.tokenizer.channels)
 
-    dynamics = DynamicsModel(cfg.model, n_latents=n_latents, latent_dim=latent_dim)
-    _load_state(dynamics, str(dynamics_ckpt), prefix="model.")
+    dynamics = DynamicsModel(dyn_cfg, n_latents=n_latents, latent_dim=latent_dim)
+    _load_state(dynamics, str(dynamics_ckpt), prefix=ckpt_prefix)
     dynamics.eval()
     dynamics.to(device)
     tokenizer.to(device)
@@ -258,11 +271,20 @@ def _write_rollout_videos(
     pred_videos: list[np.ndarray],
     compare_videos: list[np.ndarray],
     fps: int,
+    *,
+    annotate_steps: bool = False,
+    names: list[str] | None = None,
 ) -> None:
+    from dreamer4.video_utils import annotate_frames_uint8
+
     out_dir.mkdir(parents=True, exist_ok=True)
     for i, (pred, compare) in enumerate(zip(pred_videos, compare_videos)):
-        pred_path = out_dir / f"rollout_video_{i:02d}.mp4"
-        compare_path = out_dir / f"rollout_video_{i:02d}_gt_pred.mp4"
+        tag = names[i] if names and i < len(names) else f"{i:02d}"
+        pred_path = out_dir / f"rollout_video_{tag}.mp4"
+        compare_path = out_dir / f"rollout_video_{tag}_gt_pred.mp4"
+        if annotate_steps:
+            pred = annotate_frames_uint8(pred)
+            compare = annotate_frames_uint8(compare)
         iio.imwrite(pred_path, pred, fps=fps, codec="h264")
         iio.imwrite(compare_path, compare, fps=fps, codec="h264")
         print(f"Saved {pred_path} and {compare_path}")
@@ -281,13 +303,14 @@ def _run_rollout_video_and_save(
     flow_steps: int,
     fps: int,
     extra_metrics: dict[str, Any],
+    annotate_steps: bool = False,
 ) -> dict[str, Any]:
     device = next(dynamics.parameters()).device
     image, action, _ = align_dynamics_batch(batch.image.to(device), batch.action.to(device))
     assert image is not None
 
     patch_size = int(cfg.model.tokenizer.patch_size)
-    packing_factor = int(cfg.model.get("packing_factor", 1))
+    _, packing_factor, _ = _dynamics_model_cfg(cfg)
     n_spatial = tokenizer.encoder.n_latents // packing_factor
     image_size = int(cfg.model.tokenizer.image_size)
     channels = int(cfg.model.tokenizer.channels)
@@ -310,7 +333,20 @@ def _run_rollout_video_and_save(
     metrics.update(extra_metrics)
 
     video_dir = out_dir / "videos"
-    _write_rollout_videos(video_dir, pred_videos, compare_videos, fps)
+    episode_meta = extra_metrics.get("episodes")
+    video_names = None
+    if episode_meta:
+        video_names = [
+            f"ep{meta['episode_idx']}_ret{meta['return']:.0f}" for meta in episode_meta[:max_items]
+        ]
+    _write_rollout_videos(
+        video_dir,
+        pred_videos,
+        compare_videos,
+        fps,
+        annotate_steps=annotate_steps,
+        names=video_names,
+    )
     (out_dir / "video_metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
     print(json.dumps(metrics, indent=2))
     return metrics
@@ -501,6 +537,16 @@ Examples:
         help="Attention window L; first L steps attend to all past, then last L only (default: train.rollout_ctx)",
     )
     parser.add_argument("--video-fps", type=int, default=15, help="FPS for rollout mp4 export")
+    parser.add_argument(
+        "--annotate-steps",
+        action="store_true",
+        help="Overlay step 0, 1, ... on each rollout mp4 frame (top-right)",
+    )
+    parser.add_argument(
+        "--skip-panel",
+        action="store_true",
+        help="Skip static rollout panels (e.g. when only exporting --rollout-video)",
+    )
     parser.add_argument("--device", default="cuda", help="cuda or cpu")
     parser.add_argument("overrides", nargs="*", help="Config overrides")
     args = parser.parse_args()
@@ -555,7 +601,10 @@ Examples:
             flow_steps=flow_steps,
             fps=args.video_fps,
             extra_metrics=extra,
+            annotate_steps=args.annotate_steps,
         )
+        if args.skip_panel:
+            return
 
     _run_rollout_and_save(
         cfg,

@@ -80,12 +80,13 @@ log:
 eval:
   task: walker_walk
   image_size: 64
-  action_repeat: 2
+  action_repeat: 1
   max_episode_steps: 1000
-  max_history: 32
+  max_history: 16
   camera_id: -1
   proprio: false
   image: true
   episodes: 10
   num_envs: 4
+  gpu_ids: all
   env_eval: true

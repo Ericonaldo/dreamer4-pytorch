@@ -8,7 +8,7 @@ from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities import rank_zero_warn
 from omegaconf import DictConfig
 
-from dreamer4.bc_env_eval import AsyncBCEval
+from dreamer4.policy_agent import AsyncBCEval
 from dreamer4.data import align_dynamics_batch
 from dreamer4.modules.base import BaseModule
 from dreamer4.modules.bc import _load_state
@@ -92,7 +92,6 @@ class BCDynamicsModule(BaseModule):
         if batch.image is None:
             raise ValueError("BC+dynamics training requires images; set data.obs_mode=image or both")
 
-        prefix = "val" if stage == "val" else self.stage
         image, action, reward = align_dynamics_batch(batch.image, batch.action, batch.reward)
         with torch.no_grad():
             packed_z = self._encode_packed(image)
@@ -115,16 +114,16 @@ class BCDynamicsModule(BaseModule):
         )
 
         loss = self.flow_weight * flow_loss + bc_loss_val
+        dyn_prefix = "dynamics" if stage == "train" else "val"
+        bc_prefix = "bc" if stage == "train" else "val"
         for key, value in flow_metrics.items():
             prog = stage == "train" and key == "flow_mse"
-            self.log(f"{prefix}/dynamics/{key}", value, prog_bar=prog, sync_dist=True)
+            self.log(f"{dyn_prefix}/{key}", value, prog_bar=prog, sync_dist=True)
         for key, value in bc_metrics.items():
             prog = stage == "train" and key in ("action_nll", "action_mse", "action_out_mean")
-            self.log(f"{prefix}/bc/{key}", value, prog_bar=prog, sync_dist=True)
+            self.log(f"{bc_prefix}/{key}", value, prog_bar=prog, sync_dist=True)
         if stage == "val":
-            self.log("val/loss", loss, sync_dist=True)
-            self.log("val/dynamics/loss", flow_loss, sync_dist=True)
-            self.log("val/bc/loss", bc_loss_val, sync_dist=True)
+            self.log(f"{self.stage}/loss", loss, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -143,6 +142,10 @@ class BCDynamicsModule(BaseModule):
     def on_train_batch_end(self, *_) -> None:
         if self.trainer.is_global_zero:
             self._env_eval.poll(self)
+
+    def on_train_end(self) -> None:
+        if self.trainer.is_global_zero:
+            self._env_eval.drain(self)
 
     def on_validation_epoch_end(self) -> None:
         if not self.trainer.is_global_zero:
@@ -174,7 +177,7 @@ class BCDynamicsModule(BaseModule):
             )
 
             for key, value in metrics.items():
-                self.log(f"val/dynamics/{key}", value, sync_dist=False)
+                self.log(f"val/{key}", value, sync_dist=False)
 
             step = int(self.trainer.global_step)
             run_dir = Path(self.cfg.log.dir) / self.cfg.log.run_name
@@ -192,7 +195,7 @@ class BCDynamicsModule(BaseModule):
                     import wandb
 
                     logger.experiment.log(
-                        {"bc_dynamics/rollout_viz": wandb.Image(panel, caption=caption)},
+                        {"dynamics/rollout_viz": wandb.Image(panel, caption=caption)},
                         step=step,
                     )
 
@@ -200,7 +203,7 @@ class BCDynamicsModule(BaseModule):
         if not eval_cfg.get("env_eval", True):
             return
         try:
-            from dreamer4.bc_env_eval import run_bc_env_eval  # noqa: F401
+            from dreamer4.env import make_dmc_env  # noqa: F401
         except ImportError as exc:
             rank_zero_warn(f"Skipping BC env eval (install dreamer4[dmc]): {exc}")
             return

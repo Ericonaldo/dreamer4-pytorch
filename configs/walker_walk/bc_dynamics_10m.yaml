@@ -42,10 +42,7 @@ model:
     n_register: 4
     n_agent: 1
     action_dim: 6
-    space_mode: wm_dynamics
-    space_modes: [wm_dynamics, wm_agent]
-    dynamics_space_mode: wm_dynamics
-    bc_space_mode: wm_agent
+    space_modes: [wm_dynamics, wm_agent]  # flow uses wm_dynamics, BC uses wm_agent (auto)
   action_horizon: 8
   policy_hidden: 512
   reward_hidden: 512
@@ -80,7 +77,7 @@ train:
 
 log:
   dir: logs
-  run_name: walker_walk/bc_dynamics_100m
+  run_name: walker_walk/bc_dynamics_10m
   every_n_steps: 100
   wandb: true
   project: dreamer4-walker-walk
@@ -89,12 +86,13 @@ log:
 eval:
   task: walker_walk
   image_size: 64
-  action_repeat: 2
+  action_repeat: 1
   max_episode_steps: 1000
-  max_history: 32
+  max_history: 16
   camera_id: -1
   proprio: false
   image: true
   episodes: 8
   num_envs: 8
+  gpu_ids: all
   env_eval: true
