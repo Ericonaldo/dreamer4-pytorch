@@ -42,6 +42,7 @@ class DynamicsModule(BaseModule):
         self.rollout_horizon = int(cfg.train.get("rollout_horizon", 8))
         self.rollout_flow_steps = int(cfg.train.get("rollout_flow_steps", 8))
         self._val_rollout_batch: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._val_viz_idx: int | None = None
 
     def _encode_packed(self, image_bthwc: torch.Tensor) -> torch.Tensor:
         from dreamer4.models.dynamics import pack_bottleneck_to_spatial
@@ -69,9 +70,13 @@ class DynamicsModule(BaseModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        if batch_idx == 0 and self.trainer.is_global_zero and batch.image is not None:
-            image, action, _ = align_dynamics_batch(batch.image, batch.action)
-            self._val_rollout_batch = (image.detach(), action.detach())
+        if self.trainer.is_global_zero and batch.image is not None:
+            if batch_idx == 0:
+                self._pick_val_viz_batch_idx()
+                self._val_rollout_batch = None
+            if batch_idx == self._val_viz_idx:
+                image, action, _ = align_dynamics_batch(batch.image, batch.action)
+                self._val_rollout_batch = (image.detach(), action.detach())
         return self._shared_step(batch, "val")
 
     def on_validation_epoch_end(self) -> None:
@@ -82,6 +87,7 @@ class DynamicsModule(BaseModule):
 
         image, action = self._val_rollout_batch
         self._val_rollout_batch = None
+        self._val_viz_idx = None
 
         max_items = int(self.cfg.log.get("viz_max_items", 4))
         metrics, panel, _, _ = run_dynamics_rollout_eval(

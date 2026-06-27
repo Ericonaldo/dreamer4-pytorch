@@ -21,6 +21,7 @@ class TokenizerModule(BaseModule):
         self.model = build_tokenizer(cfg.model)
         self.patch_size = int(cfg.model.patch_size)
         self._val_viz: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+        self._val_viz_idx: int | None = None
 
         self.use_lpips = bool(cfg.train.get("use_lpips", False))
         self.lpips_weight = float(cfg.train.get("lpips_weight", 0.2))
@@ -58,14 +59,14 @@ class TokenizerModule(BaseModule):
             self.model, image_bthwc, self.patch_size, **self._lpips_kwargs()
         )
 
-    def _shared_step(self, batch, stage: str) -> torch.Tensor:
+    def _shared_step(self, batch, stage: str, *, capture_viz: bool = False) -> torch.Tensor:
         if batch.image is None:
             raise ValueError("Tokenizer training requires images; set data.obs_mode=image or both")
 
         if stage == "val":
             with torch.no_grad():
                 loss, metrics, pred, _, mae_mask = self._tokenizer_eval(batch.image)
-            if self.trainer.is_global_zero:
+            if capture_viz and self.trainer.is_global_zero:
                 self._val_viz = (batch.image.detach(), pred.detach(), mae_mask.detach())
             self.log("val/loss", loss, sync_dist=True)
             for key, value in metrics.items():
@@ -78,7 +79,15 @@ class TokenizerModule(BaseModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        return self._shared_step(batch, "val")
+        if self.trainer.is_global_zero and batch.image is not None and batch_idx == 0:
+            self._pick_val_viz_batch_idx()
+            self._val_viz = None
+        capture = (
+            self.trainer.is_global_zero
+            and batch.image is not None
+            and batch_idx == self._val_viz_idx
+        )
+        return self._shared_step(batch, "val", capture_viz=capture)
 
     def on_validation_epoch_end(self) -> None:
         if self._val_viz is None or not self.trainer.is_global_zero:
@@ -88,6 +97,7 @@ class TokenizerModule(BaseModule):
 
         image, pred, mae_mask = self._val_viz
         self._val_viz = None
+        self._val_viz_idx = None
 
         panel = recon_panel_uint8(
             image,

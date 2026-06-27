@@ -11,9 +11,8 @@ Dynamics:
   inputs: a_t, z_t, agent_t
   output: h_t
 AgentHeads(h_t):
-  - policy: MLP → (B,T,L,A)  L-step action, MSE
-  - reward: MLP → (B,T,L)
-  - value:  MLP → (B,T)
+  - policy: squashed Gaussian → (B,T,L,A)  L-step action MTP, NLL
+  - reward: symexp twohot MLP → (B,T,L)   L-step future reward MTP, twohot CE
 ```
 
 Data token order
@@ -57,7 +56,7 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [x] Multi-GPU DDP
 - [x] Latent temporal collapse — tune `embed_dim` / `latent_dim` (default configs: `embed_dim=64`, `latent_dim=32`, `patch_size=8`, `n_latents=16`; large 512-dim runs collapsed); monitor `tokenizer/z_temporal_std`
 - [x] Robust checkpoint pruning (`KeepLastCheckpoints` handles Lightning `-v1` suffixes, rank-0 only)
-- [ ] Resume from Lightning checkpoint (`train.resume_ckpt`)
+- [x] Resume from Lightning checkpoint (`train.resume_ckpt`)
 - [ ] Standalone tokenizer eval script (recon metrics + panels from checkpoint)
 - [ ] Ablation: `scale_pos_embeds` off (paper notes it can help)
 
@@ -71,21 +70,27 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [x] Agent token slot — `n_agent=1`, zero agent at pretrain, `wm_dynamics` (ref `wm_agent_isolated`); `forward` returns `h_t` for BC
 - [x] `wm_agent` space mask — agent attends world; world/action ignore agent keys
 - [x] Action-conditioned rollout eval — dataset actions, autoregressive latent sampling, decode, `val/rollout_mse` / PSNR vs floor, wandb viz
+- [x] Standalone rollout eval script — panels, return-band sweeps, long mp4 rollouts (`eval_dynamics_rollout.py`)
 - [x] Dynamics config aligned with tokenizer ckpt (`tokenizer_ckpt`, arch in `dynamics.yaml`)
 
 ### BC (stage 3)
 
-- [x] `BCModel` — dynamics init (`dynamics_ckpt`), `wm_agent`, learned agent tokens, `AgentHeads` (L-step action / reward + value, MSE)
+- [x] `BCModel` — dynamics init (`dynamics_ckpt`), `wm_agent`, learned agent tokens, `AgentHeads` (L-step action NLL + reward symexp twohot MTP; no value head in BC)
 - [x] `BCModule` training with frozen tokenizer encode
+- [x] `BCDynamicsModule` — joint flow + BC on shared backbone (`bc_dynamics.yaml`)
 - [x] Config `configs/walker_walk/bc.yaml`, smoke `bc_debug.yaml`
-- [ ] `TaskEmbedder` for multi-task BC — skipped for now: only Walker Walk is implemented, so a single learned `agent_tokens` parameter is enough and avoids an extra embedding table with no conditioning signal; add when training multiple tasks on shared weights
+- [ ] ~`TaskEmbedder` for multi-task BC — skipped for now: only Walker Walk is implemented, so a single learned `agent_tokens` parameter is enough and avoids an extra embedding table with no conditioning signal; add when training multiple tasks on shared weights~
 - [ ] Closed-loop L-step rollout BC (policy-fed actions into dynamics)
-- [ ] Config tuning; reward/value targets (returns vs raw reward)
+- [ ] Config tuning (loss weights, `reward_bins`, etc.)
+- [ ] **Reward MTP readout switch (config)** — selectable via YAML, not implemented yet:
+  - `symexp_twohot` (current): `SymExpTwoHotHead` + twohot CE; raw rewards from dataloader, **no norm**
+  - `mse`: simple MLP → scalar `(B,T,L)` + MSE on L-step future rewards; **normalize rewards in dataloader** (e.g. running mean/std or fixed scale in `data` / `train` config); denorm for metrics only
+  - Config sketch: `model.reward_head: symexp_twohot | mse`; when `mse`, add `data.reward_norm` (or `train.reward_norm`) for dataloader stats / clip range
 
 ### Policy / imagination (stage 4)
 
 - [ ] `imagine_rollout` in latent space (`imagination.py` stub)
-- [ ] `PolicyModule` — imagination RL on top of BC (`modules/policy.py`)
+- [ ] `PolicyModule` — imagination RL on top of BC (`modules/policy.py`); value head with TD(λ) return targets
 - [ ] Config `configs/walker_walk/policy.yaml`
 
 ### Data & infra
@@ -119,7 +124,7 @@ Four stages, each driven by a YAML config under `configs/walker_walk/`:
 |-------|--------|-------------|
 | 1 | `tokenizer.yaml` | Causal patch tokenizer |
 | 2 | `dynamics.yaml` | Interactive dynamics model |
-| 3 | `bc.yaml` | BC policy + reward heads |
+| 3 | `bc.yaml` / `bc_dynamics.yaml` | BC policy + reward heads (action + reward MTP) |
 | 4 | `policy.yaml` | Imagination RL on top of BC |
 
 ```bash
@@ -157,9 +162,56 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 
 Tune `train.batch_size` if OOM; scale `data.num_workers` per GPU (e.g. 2–4).
 
+### Resume training
+
+```bash
+# Continue to train.max_steps (global_step restored from ckpt)
+uv run dreamer4-train configs/walker_walk/tokenizer.yaml \
+  train.max_steps=20000 \
+  train.resume_ckpt=logs/walker_walk/tokenizer/checkpoints/step-step=10000.ckpt
+
+# Rebuild cosine on current max_steps at global_step (not ckpt scheduler / floor lr)
+uv run dreamer4-train configs/walker_walk/tokenizer.yaml \
+  train.max_steps=20000 \
+  train.resume_ckpt=logs/walker_walk/tokenizer/checkpoints/step-step=10000.ckpt \
+  train.resume_reset_scheduler=true
+```
+
+`train.resume_reset_scheduler=true` keeps model, optimizer, and `global_step`, then sets `CosineAnnealingLR.T_max` to current `max_steps` and `last_epoch=global_step` (checkpoint state restores the old `T_max`, so this override is required when extending `max_steps`).
+
 ### Tokenizer validation
 
 Episode-level hold-out via `data.val_fraction` (default 5%). Metrics: `val/loss_mae` (masked MSE, same as train), `val/loss_full` (all-patch MSE, stable), and `val/z_temporal_std` (latent diversity across time; should stay well above ~1e-3). Reconstruction panels (`target | masked | recon_masked | recon_full`) go to `logs/<run_name>/viz/` and wandb (`tokenizer/viz`) when `log.wandb=true`. Tune `train.val_every`, `train.val_max_batches`, `log.viz_max_items`.
+
+### Dynamics rollout eval (standalone)
+
+Script: `dreamer4/eval_dynamics_rollout.py`. Loads frozen tokenizer + dynamics checkpoint, replays **dataset actions** (open-loop), decodes latents, and compares to GT.
+
+**Panel eval** (default): autoregressive rollout with context lengths `ctx=1..rollout_ctx`; GT frames in context, predicted frames after. Outputs `rollout_panel_all.png`, `rollout_traj_{i:02d}.png`, and `metrics.json` (`rollout_mse`, `rollout_psnr`, repeat-last-frame floor). Horizon comes from `train.rollout_ctx`, `train.rollout_horizon`, `train.rollout_flow_steps`.
+
+**Long rollout videos** (`--rollout-video`): single GT frame `obs[0]` as context; for step `g` predicting frame `g`, attend to all past latents while `g <= L`, then the previous `L` only (`L` = `--attn-window`, default `train.rollout_ctx`). Default rollout length 64 (`--rollout-length`). Writes `videos/rollout_video_*.mp4`, `videos/rollout_video_*_gt_pred.mp4` (GT over pred), and `video_metrics.json`.
+
+**Episode selection**: `--split train|val|all`; `--min-episode-return` / `--max-episode-return`; `--by-reward-bands` for Walker Walk return strata (writes `summary.json` + per-band dirs).
+
+```bash
+# Panels + metrics on val split
+uv run python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yaml \
+  --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \
+  --out-dir logs/walker_walk/dynamics/rollout_eval \
+  --split val --max-items 4
+
+# 64-step rollout mp4s (context obs[0], attn window 8)
+uv run python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yaml \
+  --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \
+  --out-dir logs/walker_walk/dynamics/rollout_videos \
+  --rollout-video --rollout-length 64 --attn-window 8 --max-items 2
+
+# Rollout stratified by cumulative return
+uv run python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yaml \
+  --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \
+  --out-dir logs/walker_walk/dynamics/rollout_bands \
+  --by-reward-bands --split val
+```
 
 ## Remote training
 
@@ -204,21 +256,25 @@ dreamer4/
     transformer_blocks.py
     tokenizer.py
     dynamics.py
-    policy.py         # AgentHeads
+    policy.py         # AgentHeads, BCModel, bc_loss, SymExpTwoHot readouts
   modules/            # Lightning modules per stage
     base.py
     tokenizer.py
     dynamics.py
     bc.py
+    bc_dynamics.py
     policy.py
   imagination.py      # Latent rollouts (stub)
   train.py            # Trainer, callbacks, dataloaders
   cli.py
+  eval_dynamics_rollout.py  # Standalone dynamics rollout panels + optional mp4
+  eval_policy.py            # DMC online BC / random policy eval
 configs/walker_walk/
   tokenizer.yaml
   tokenizer_w_lpips.yaml
   tokenizer_debug.yaml
   dynamics.yaml
   bc.yaml
+  bc_dynamics.yaml
   policy.yaml
 ```

@@ -67,7 +67,6 @@ class BCModule(BaseModule):
 
         self.action_weight = float(cfg.train.get("action_weight", 1.0))
         self.reward_weight = float(cfg.train.get("reward_weight", 1.0))
-        self.value_weight = float(cfg.train.get("value_weight", 1.0))
 
     def _encode_packed(self, image_bthwc: torch.Tensor) -> torch.Tensor:
         z = self._encode_images(self.tokenizer, image_bthwc, self.patch_size)
@@ -87,13 +86,13 @@ class BCModule(BaseModule):
             outputs,
             action,
             reward,
+            self.model.heads,
             action_horizon=self.action_horizon,
             action_weight=self.action_weight,
             reward_weight=self.reward_weight,
-            value_weight=self.value_weight,
         )
         for key, value in metrics.items():
-            prog = stage == "train" and key in ("action_mse", "action_out_mean", "action_mse_tanh")
+            prog = stage == "train" and key in ("action_nll", "action_mse", "action_out_mean")
             self.log(f"{prefix}/{key}", value, prog_bar=prog, sync_dist=True)
         if stage == "val":
             self.log("val/loss", loss, sync_dist=True)

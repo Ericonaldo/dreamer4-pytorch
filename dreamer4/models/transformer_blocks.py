@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -154,6 +154,19 @@ class MultiheadSelfAttention(nn.Module):
         return self.out(y)
 
 
+def _normalize_space_modes(mode: Union[str, Sequence[str]]) -> tuple[str, ...]:
+    if isinstance(mode, str):
+        return (mode,)
+    modes = tuple(mode)
+    if not modes:
+        raise ValueError("space_mode must be a non-empty string or sequence of strings")
+    return modes
+
+
+def _space_mode_buffer_name(mode: str) -> str:
+    return f"attn_mask_{mode.replace('-', '_')}"
+
+
 class SpaceSelfAttentionModality(nn.Module):
     def __init__(
         self,
@@ -161,32 +174,44 @@ class SpaceSelfAttentionModality(nn.Module):
         n_heads: int,
         modality_ids: torch.Tensor,
         n_latents: int,
-        mode: str,
+        mode: Union[str, Sequence[str]],
         dropout: float,
     ):
         super().__init__()
         self.n_latents = int(n_latents)
-        self.mode = mode
+        self.modes = _normalize_space_modes(mode)
+        self.mode = self.modes[0]
         self.register_buffer("modality_ids", modality_ids.to(torch.int32), persistent=False)
         S = int(self.modality_ids.numel())
-        allow = self._build_allow(S)
-        self.register_buffer("attn_mask", allow.unsqueeze(0).unsqueeze(0), persistent=False)
+        for space_mode in self.modes:
+            allow = self._build_allow(S, space_mode)
+            self.register_buffer(
+                _space_mode_buffer_name(space_mode),
+                allow.unsqueeze(0).unsqueeze(0),
+                persistent=False,
+            )
         self.attn = MultiheadSelfAttention(d_model, n_heads, dropout=dropout)
 
-    def _build_allow(self, S: int) -> torch.Tensor:
+    def _attn_mask(self, space_mode: Optional[str]) -> torch.Tensor:
+        mode = space_mode or self.mode
+        if mode not in self.modes:
+            raise ValueError(f"Unknown space_mode {mode!r}, expected one of {self.modes}")
+        return getattr(self, _space_mode_buffer_name(mode))
+
+    def _build_allow(self, S: int, mode: str) -> torch.Tensor:
         device = self.modality_ids.device
         q_idx = torch.arange(S, device=device).unsqueeze(1)
         k_idx = torch.arange(S, device=device).unsqueeze(0)
         is_q_lat = q_idx < self.n_latents
         is_k_lat = k_idx < self.n_latents
         same_mod = self.modality_ids[q_idx] == self.modality_ids[k_idx]
-        if self.mode == "encoder":
+        if mode == "encoder":
             return torch.where(is_q_lat, torch.ones((S, S), dtype=torch.bool, device=device), same_mod)
-        elif self.mode == "decoder":
+        elif mode == "decoder":
             allow_lat_q = is_k_lat
             allow_nonlat_q = same_mod | is_k_lat
             return torch.where(is_q_lat, allow_lat_q, allow_nonlat_q)
-        elif self.mode == "wm_dynamics":
+        elif mode == "wm_dynamics":
             # Ref wm_agent_isolated: reserve agent slot; world tokens ignore agent; agent only sees agent.
             q_mod = self.modality_ids[q_idx]
             k_mod = self.modality_ids[k_idx]
@@ -195,7 +220,7 @@ class SpaceSelfAttentionModality(nn.Module):
             allow = torch.ones((S, S), dtype=torch.bool, device=device)
             allow = torch.where(~is_q_agent, ~is_k_agent, allow)
             return torch.where(is_q_agent, is_k_agent, allow)
-        elif self.mode == "wm_agent":
+        elif mode == "wm_agent":
             # Agent reads all; obs (spatial/register/noise) reads obs+action; action reads action only;
             # non-agent queries never read agent keys (ref edwhu/dreamer4-jax).
             q_mod = self.modality_ids[q_idx]
@@ -228,12 +253,12 @@ class SpaceSelfAttentionModality(nn.Module):
             )
             allow_nonagent = torch.where(is_k_agent, False, allow_nonagent)
             return torch.where(is_q_agent, allow_agent_q, allow_nonagent)
-        raise ValueError(f"Unsupported space mode: {self.mode}")
+        raise ValueError(f"Unsupported space mode: {mode}")
 
-    def forward(self, x_btSd: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_btSd: torch.Tensor, *, space_mode: Optional[str] = None) -> torch.Tensor:
         B, T, S, D = x_btSd.shape
         x = x_btSd.reshape(B * T, S, D)
-        mask = self.attn_mask.expand(B * T, 1, S, S)
+        mask = self._attn_mask(space_mode).expand(B * T, 1, S, S)
         y = self.attn(x, attn_mask=mask, is_causal=False)
         return y.reshape(B, T, S, D)
 
@@ -268,7 +293,7 @@ class BlockCausalLayer(nn.Module):
         n_heads: int,
         n_latents: int,
         modality_ids: torch.Tensor,
-        space_mode: str,
+        space_mode: Union[str, Sequence[str]],
         dropout: float,
         mlp_ratio: float,
         layer_index: int,
@@ -289,8 +314,8 @@ class BlockCausalLayer(nn.Module):
         self.norm3 = RMSNorm(d_model)
         self.mlp = MLP(d_model, mlp_ratio=mlp_ratio, dropout=dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.drop1(self.space(self.norm1(x)))
+    def forward(self, x: torch.Tensor, *, space_mode: Optional[str] = None) -> torch.Tensor:
+        x = x + self.drop1(self.space(self.norm1(x), space_mode=space_mode))
         if self.do_time:
             x = x + self.drop2(self.time(self.norm2(x)))
         return x + self.mlp(self.norm3(x))
@@ -304,13 +329,14 @@ class BlockCausalTransformer(nn.Module):
         depth: int,
         n_latents: int,
         modality_ids: torch.Tensor,
-        space_mode: str,
+        space_mode: Union[str, Sequence[str]],
         dropout: float,
         mlp_ratio: float,
         time_every: int,
         latents_only_time: bool,
     ):
         super().__init__()
+        self.space_modes = _normalize_space_modes(space_mode)
         self.layers = nn.ModuleList(
             [
                 BlockCausalLayer(
@@ -318,7 +344,7 @@ class BlockCausalTransformer(nn.Module):
                     n_heads=n_heads,
                     n_latents=n_latents,
                     modality_ids=modality_ids,
-                    space_mode=space_mode,
+                    space_mode=self.space_modes,
                     dropout=dropout,
                     mlp_ratio=mlp_ratio,
                     layer_index=i,
@@ -329,7 +355,7 @@ class BlockCausalTransformer(nn.Module):
             ]
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *, space_mode: Optional[str] = None) -> torch.Tensor:
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x, space_mode=space_mode)
         return x

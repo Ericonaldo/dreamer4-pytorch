@@ -26,6 +26,8 @@ class ValidateEveryNSteps(Callback):
         step = trainer.global_step
         if step > 0 and step % self.every_n_steps == 0:
             pl_module.eval()
+            n_batches = max(1, min(len(self.val_dataloader), self.limit_batches))
+            pl_module._val_n_batches = n_batches
             with torch.no_grad():
                 for i, val_batch in enumerate(self.val_dataloader):
                     if i >= self.limit_batches:
@@ -33,6 +35,7 @@ class ValidateEveryNSteps(Callback):
                     val_batch = trainer.strategy.batch_to_device(val_batch)
                     pl_module.validation_step(val_batch, i)
             pl_module.on_validation_epoch_end()
+            pl_module._val_n_batches = None
             pl_module.train()
 
 
@@ -78,7 +81,7 @@ def _window_mode(cfg: DictConfig) -> str:
     mode = str(cfg.data.get("window_mode", "auto"))
     if mode != "auto":
         return mode
-    return "transition" if cfg.stage in ("dynamics", "bc") else "frame"
+    return "transition" if cfg.stage in ("dynamics", "bc", "bc_dynamics") else "frame"
 
 
 def _episode_dataset(cfg: DictConfig, episode_indices: list[int] | None) -> GranularEpisodeDataset:
@@ -174,7 +177,7 @@ def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool, val_loader: Dat
     strategy = "auto"
     devices = cfg.train.devices
     if isinstance(devices, int) and devices > 1:
-        strategy = "ddp_find_unused_parameters_true" if cfg.stage == "bc" else "ddp"
+        strategy = "ddp_find_unused_parameters_true" if cfg.stage in ("bc", "bc_dynamics") else "ddp"
 
     val_every = int(cfg.train.get("val_every", 0) or 0)
     step_val = has_val and val_every > 0
@@ -201,6 +204,17 @@ def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool, val_loader: Dat
     )
 
 
+def _resolve_resume_ckpt(cfg: DictConfig) -> str | None:
+    """Return checkpoint path for trainer.fit."""
+    resume_ckpt = cfg.train.get("resume_ckpt")
+    if not resume_ckpt:
+        return None
+    path = Path(resume_ckpt)
+    if not path.is_file():
+        raise FileNotFoundError(f"resume_ckpt not found: {path}")
+    return str(path)
+
+
 def train(cfg: DictConfig) -> None:
     stage = cfg.stage
     if stage not in STAGES:
@@ -214,4 +228,10 @@ def train(cfg: DictConfig) -> None:
     module = module_cls(cfg)
     train_loader, val_loader = build_dataloaders(cfg)
     trainer = build_trainer(cfg, run_dir, has_val=val_loader is not None, val_loader=val_loader)
-    trainer.fit(module, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    ckpt_path = _resolve_resume_ckpt(cfg)
+    trainer.fit(
+        module,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader,
+        ckpt_path=ckpt_path,
+    )

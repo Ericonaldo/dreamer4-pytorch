@@ -1,15 +1,15 @@
-stage: bc
+stage: bc_dynamics
 
 data:
   path: data/dmc_walker_walk
   seq_len: 16
   obs_mode: image
-  num_workers: 8 
+  num_workers: 8
   val_fraction: 0.05
   val_seed: 0
 
 tokenizer_ckpt: logs/walker_walk/tokenizer/checkpoints/step-step=20000.ckpt
-dynamics_ckpt: logs/walker_walk/dynamics/checkpoints/step-step=50000.ckpt
+dynamics_ckpt: null  # optional warm start from dynamics-only pretrain
 
 model:
   tokenizer:
@@ -40,7 +40,10 @@ model:
     n_register: 4
     n_agent: 1
     action_dim: 6
-    space_mode: wm_agent
+    space_mode: wm_dynamics
+    space_modes: [wm_dynamics, wm_agent]
+    dynamics_space_mode: wm_dynamics
+    bc_space_mode: wm_agent
   action_horizon: 8
   policy_hidden: 256
   reward_hidden: 256
@@ -52,30 +55,34 @@ model:
 
 train:
   batch_size: 128
-  max_steps: 20_000
+  max_steps: 100_000
   checkpoint_every: 2000
   checkpoint_keep_last: 5
   val_every: 1000
   val_max_batches: 8
-  freeze_dynamics: false
+  flow_weight: 1.0
   action_weight: 1.0
   reward_weight: 0.1
+  rollout_ctx: 8
+  rollout_horizon: 8
+  rollout_flow_steps: 10
   devices: 8
   accelerator: gpu
   precision: bf16-mixed
   grad_clip: 1.0
   optimizer:
-    lr: 5.0e-4
+    lr: 1.0e-3
     betas: [0.9, 0.95]
     weight_decay: 0.01
     use_scheduler: true
 
 log:
   dir: logs
-  run_name: walker_walk/bc
+  run_name: walker_walk/bc_dynamics
   every_n_steps: 100
   wandb: true
   project: dreamer4-walker-walk
+  viz_max_items: 4
 
 eval:
   task: walker_walk

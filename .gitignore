@@ -22,7 +22,7 @@ data/
 progress.md
 TUTORIAL.md
 .venv/
-
+tests/
 ref/
 scripts/
 analysis/

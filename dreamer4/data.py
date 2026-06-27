@@ -101,6 +101,81 @@ def split_episode_indices(
     return train_idx, val_idx
 
 
+def episode_cumulative_returns(path: str) -> tuple[list[tuple[int, int]], np.ndarray]:
+    """Discover episodes and return per-episode sum of `reward` over inclusive [start, end]."""
+    reader = _open_granular_reader(path)
+    n_chunks = len(reader)
+    episodes = _discover_episodes(reader, n_chunks, CHUNK_SIZE)
+    cache = _ChunkCache(reader)
+    returns = np.zeros(len(episodes), dtype=np.float64)
+    for ep_idx, (gs, ge) in enumerate(episodes):
+        rew = _slice_global(cache, gs, ge - gs + 1, CHUNK_SIZE)["reward"]
+        returns[ep_idx] = float(np.sum(rew))
+    reader.close()
+    return episodes, returns
+
+
+def select_episodes_by_return(
+    returns: np.ndarray,
+    min_return: float,
+    *,
+    episode_indices: set[int] | None = None,
+    top_k: int | None = None,
+    max_return: float | None = None,
+) -> list[tuple[int, float]]:
+    """Return [(ep_idx, return)]; with max_return uses [min_return, max_return)."""
+    candidates: list[tuple[int, float]] = []
+    for ep_idx, ret in enumerate(returns):
+        if episode_indices is not None and ep_idx not in episode_indices:
+            continue
+        r = float(ret)
+        if r < min_return:
+            continue
+        if max_return is not None and r >= max_return:
+            continue
+        candidates.append((ep_idx, r))
+    if max_return is None:
+        candidates.sort(key=lambda x: x[1], reverse=True)
+    else:
+        mid = (min_return + max_return) / 2.0
+        candidates.sort(key=lambda x: abs(x[1] - mid))
+    if top_k is not None:
+        candidates = candidates[:top_k]
+    return candidates
+
+
+def reward_band_counts(returns: np.ndarray, bands: list[tuple[str, float, float]]) -> list[dict]:
+    """Population counts per band [low, high)."""
+    out = []
+    for name, low, high in bands:
+        mask = (returns >= low) & (returns < high)
+        band_rets = returns[mask]
+        out.append(
+            {
+                "name": name,
+                "low": low,
+                "high": high,
+                "count": int(mask.sum()),
+                "return_mean": float(band_rets.mean()) if len(band_rets) else None,
+                "return_min": float(band_rets.min()) if len(band_rets) else None,
+                "return_max": float(band_rets.max()) if len(band_rets) else None,
+            }
+        )
+    return out
+
+
+def transition_window_offset(ep_len: int, seq_len: int, *, position: str = "middle") -> int:
+    """In-episode offset for a transition window (0 .. ep_len - seq_len - 1)."""
+    if ep_len <= seq_len:
+        raise ValueError(f"episode length {ep_len} must exceed seq_len {seq_len}")
+    n_starts = ep_len - seq_len
+    if position == "start":
+        return 0
+    if position == "middle":
+        return n_starts // 2
+    raise ValueError(f"unknown position {position!r}")
+
+
 def _open_granular_reader(path: str):
     import granular
 
@@ -298,6 +373,21 @@ class GranularEpisodeDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.valid)
+
+    def episode_length(self, ep_idx: int) -> int:
+        gs, ge = self.episodes[ep_idx]
+        return ge - gs + 1
+
+    def get_transition_window(self, ep_idx: int, offset: int) -> dict[str, Any]:
+        """Load transition window at in-episode offset (same layout as __getitem__)."""
+        if self.window_mode != "transition":
+            raise ValueError("get_transition_window requires window_mode=transition")
+        gs, _ = self.episodes[ep_idx]
+        key = (ep_idx, gs + offset)
+        for i, valid_key in enumerate(self.valid):
+            if valid_key == key:
+                return self.__getitem__(i)
+        raise KeyError(f"no transition window for episode {ep_idx} offset {offset}")
 
     def _window_bounds(self, global_start: int) -> tuple[int, int, int, int, int, int]:
         """Return obs_start, obs_len, act_start, act_len, rew_start, rew_len in global coords."""

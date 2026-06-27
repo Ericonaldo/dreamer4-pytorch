@@ -35,6 +35,8 @@ def flow_matching_loss(
     model: nn.Module,
     z1: torch.Tensor,
     actions: torch.Tensor,
+    *,
+    space_mode: Optional[str] = None,
 ) -> Tuple[torch.Tensor, dict[str, float]]:
     """
     Simple flow matching on packed latents: corrupt with noise level sigma, predict clean z1.
@@ -45,7 +47,7 @@ def flow_matching_loss(
     sigma = torch.rand((B, T), device=device, dtype=torch.float32)
     z0 = torch.randn_like(z1)
     z_tilde = (1.0 - sigma)[..., None, None] * z0 + sigma[..., None, None] * z1
-    z1_hat, _ = model(actions, sigma, z_tilde)
+    z1_hat, _ = model(actions, sigma, z_tilde, space_mode=space_mode)
     flow_per = (z1_hat.float() - z1.float()).pow(2).mean(dim=(2, 3))
     weight = 0.9 * sigma + 0.1
     loss = (flow_per * weight).mean()
@@ -82,6 +84,13 @@ class DynamicsModel(nn.Module):
         self.time_every = int(raw.get("time_every", 4))
         self.scale_pos_embeds = bool(raw.get("scale_pos_embeds", True))
         self.space_mode = str(raw.get("space_mode", "wm_dynamics"))
+        space_modes = raw.get("space_modes")
+        if space_modes is None:
+            self.space_modes = (self.space_mode,)
+        else:
+            self.space_modes = tuple(str(m) for m in space_modes)
+            if self.space_mode not in self.space_modes:
+                self.space_modes = (self.space_mode, *self.space_modes)
         self.packing_factor = int(raw.get("packing_factor", 1))
         self.n_register = int(raw.get("n_register", 0))
         self.n_agent = int(raw.get("n_agent", 1))
@@ -123,7 +132,7 @@ class DynamicsModel(nn.Module):
             depth=self.depth,
             n_latents=0,
             modality_ids=layout.modality_ids(),
-            space_mode=self.space_mode,
+            space_mode=self.space_modes,
             dropout=self.dropout,
             mlp_ratio=self.mlp_ratio,
             time_every=self.time_every,
@@ -140,6 +149,8 @@ class DynamicsModel(nn.Module):
         sigma: torch.Tensor,
         packed_z: torch.Tensor,
         agent_tokens: Optional[torch.Tensor] = None,
+        *,
+        space_mode: Optional[str] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Predict clean packed latents. sigma: (B,T) in [0,1]. Returns (x1_hat, h_t)."""
         B, T = packed_z.shape[:2]
@@ -162,7 +173,7 @@ class DynamicsModel(nn.Module):
 
         x = torch.cat(tokens, dim=2)
         x = add_sinusoidal_positions(x, self.scale_pos_embeds)
-        x = self.transformer(x)
+        x = self.transformer(x, space_mode=space_mode)
         spatial_out = x[:, :, self.spatial_slice, :]
         x1_hat = self.flow_head(spatial_out)
         h_t = x[:, :, self.agent_slice, :] if self.n_agent > 0 else None
@@ -218,6 +229,44 @@ def sample_autoregressive_packed_sequence(
     for t in range(ctx_length, ctx_length + horizon):
         past = torch.stack(outs, dim=1)
         z_next = sample_one_timestep_packed(model, past, actions, flow_steps)
+        outs.append(z_next)
+
+    return torch.stack(outs, dim=1)
+
+
+@torch.no_grad()
+def sample_sliding_window_rollout_packed_sequence(
+    model: nn.Module,
+    z0_packed: torch.Tensor,
+    actions: torch.Tensor,
+    attn_window: int,
+    rollout_length: int,
+    flow_steps: int,
+) -> torch.Tensor:
+    """
+    Rollout from a single GT frame (obs[0]) using dataset actions.
+
+    For global step g (predicting frame g), past latents are z[0:g]. While g <= attn_window,
+    the model attends to all past frames; afterward it attends only to the previous attn_window
+    frames, with actions aligned to the same global indices (ref interactive ctx_window).
+    """
+    if rollout_length <= 0:
+        raise ValueError(f"rollout_length must be > 0, got {rollout_length}")
+    if attn_window <= 0:
+        raise ValueError(f"attn_window must be > 0, got {attn_window}")
+    if actions.shape[1] < rollout_length + 1:
+        raise ValueError(
+            f"actions must have length >= rollout_length + 1 (aligned), "
+            f"got {actions.shape[1]} for rollout_length={rollout_length}"
+        )
+
+    outs = [z0_packed]
+    for _ in range(rollout_length):
+        g = len(outs)
+        start = 0 if g <= attn_window else g - attn_window
+        past = torch.stack(outs[start:g], dim=1)
+        actions_local = actions[:, start : g + 1]
+        z_next = sample_one_timestep_packed(model, past, actions_local, flow_steps)
         outs.append(z_next)
 
     return torch.stack(outs, dim=1)
@@ -550,3 +599,100 @@ def run_dynamics_rollout_eval(
     if return_per_traj:
         return metrics, panel, frames, pred_frames, per_traj
     return metrics, panel, frames, pred_frames
+
+
+def _stack_gt_pred_video_uint8(
+    gt_bthwc: torch.Tensor,
+    pred_bthwc: torch.Tensor,
+) -> np.ndarray:
+    """(T,H,W,C) GT on top, pred on bottom -> (T, 2H, W, C) uint8."""
+    t = min(gt_bthwc.shape[1], pred_bthwc.shape[1])
+    gt = (gt_bthwc[0, :t].clamp(0, 1) * 255.0).to(torch.uint8).cpu().numpy()
+    pred = (pred_bthwc[0, :t].clamp(0, 1) * 255.0).to(torch.uint8).cpu().numpy()
+    return np.concatenate([gt, pred], axis=1)
+
+
+@torch.no_grad()
+def run_dynamics_rollout_video(
+    dynamics: nn.Module,
+    tokenizer: nn.Module,
+    image_bthwc: torch.Tensor,
+    actions: torch.Tensor,
+    *,
+    patch_size: int,
+    packing_factor: int,
+    n_spatial: int,
+    image_size: int,
+    channels: int,
+    attn_window: int,
+    rollout_length: int,
+    flow_steps: int,
+    max_items: int = 4,
+) -> tuple[dict[str, float], list[np.ndarray], list[np.ndarray], torch.Tensor, torch.Tensor]:
+    """
+    Long rollout from obs[0] only with growing then sliding attention; decode to frames.
+
+    Returns metrics, pred videos (T,H,W,C uint8), compare videos (GT over pred), gt frames, pred frames.
+    """
+    dynamics.eval()
+    total = rollout_length + 1
+    if image_bthwc.shape[1] < total:
+        raise ValueError(
+            f"need at least {total} observation frames, got {image_bthwc.shape[1]}"
+        )
+
+    frames = image_bthwc[:, :total]
+    actions_eval = actions[:, :total]
+    B = min(frames.shape[0], max_items)
+
+    z_btld = encode_images(tokenizer, frames[:B], patch_size)
+    z_gt_packed = pack_bottleneck_to_spatial(z_btld, n_spatial, packing_factor)
+    z0 = z_gt_packed[:, 0]
+
+    z_pred_packed = sample_sliding_window_rollout_packed_sequence(
+        dynamics,
+        z0,
+        actions_eval[:B],
+        attn_window,
+        rollout_length,
+        flow_steps,
+    )
+    pred_frames = decode_packed_to_images(
+        tokenizer,
+        z_pred_packed,
+        patch_size,
+        packing_factor,
+        image_size,
+        channels,
+    )
+
+    gt_b = frames[:B]
+    pred_h = pred_frames[:, 1:]
+    gt_h = gt_b[:, 1:]
+    mse_pred = (pred_h.float() - gt_h.float()).pow(2).mean()
+    floor = gt_b.clone()
+    floor[:, 1:] = gt_b[:, :1].expand(-1, rollout_length, -1, -1, -1)
+    mse_floor = (floor[:, 1:].float() - gt_h.float()).pow(2).mean()
+    psnr_pred = 10.0 * torch.log10(1.0 / mse_pred.clamp_min(1e-12))
+    psnr_floor = 10.0 * torch.log10(1.0 / mse_floor.clamp_min(1e-12))
+
+    metrics = {
+        "rollout_length": rollout_length,
+        "attn_window": attn_window,
+        "rollout_mse": float(mse_pred.detach()),
+        "rollout_mse_floor": float(mse_floor.detach()),
+        "rollout_mse_ratio": float((mse_pred / mse_floor.clamp_min(1e-12)).detach()),
+        "rollout_psnr": float(psnr_pred.detach()),
+        "rollout_psnr_floor": float(psnr_floor.detach()),
+        "rollout_psnr_gain": float((psnr_pred - psnr_floor).detach()),
+    }
+
+    pred_videos: list[np.ndarray] = []
+    compare_videos: list[np.ndarray] = []
+    for i in range(B):
+        pred_videos.append(
+            (pred_frames[i].clamp(0, 1) * 255.0).to(torch.uint8).cpu().numpy()
+        )
+        compare_videos.append(_stack_gt_pred_video_uint8(gt_b[i : i + 1], pred_frames[i : i + 1]))
+
+    return metrics, pred_videos, compare_videos, gt_b, pred_frames[:B]
