@@ -73,7 +73,7 @@ Per timestep t, build spatial token sequence (dim S = 2+S_sp+R+N = 15 by default
     agent out   → h_t (B,T,N,D)         BC readout slot
 ```
 
-**BC** (`BCModel`, stage `bc` or heads-only finetune):
+**BC** (`PolicyModel`, stage `bc` or heads-only finetune):
 ```
 h = mean(h_t, dim agent)  (B,T,D)
 AgentHeads(h):
@@ -83,7 +83,7 @@ AgentHeads(h):
 
 **BC + dynamics** (`bc_dynamics` stage, `BCDynamicsModule` — config `bc_dynamics.yaml`):
 ```
-Same shared backbone (BCModel.dynamics + learned agent_tokens + AgentHeads).
+Same shared backbone (PolicyModel.dynamics + learned agent_tokens + AgentHeads).
 Frozen tokenizer encode once → packed_z, action, reward.
 
 Two forwards per step, different space attention masks (space_modes: [wm_dynamics, wm_agent]):
@@ -147,7 +147,7 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 
 ### BC (stage 3)
 
-- [x] `BCModel` — dynamics init (`dynamics_ckpt`), `wm_agent`, learned agent tokens, `AgentHeads` (L-step action NLL + reward symexp twohot MTP; no value head in BC)
+- [x] `PolicyModel` — dynamics init (`dynamics_ckpt`), `wm_agent`, learned agent tokens, `AgentHeads` (L-step action NLL + reward symexp twohot MTP; no value head in BC)
 - [x] `BCModule` training with frozen tokenizer encode
 - [x] `BCDynamicsModule` — joint flow + BC on shared backbone (`bc_dynamics.yaml`)
 - [x] Config `configs/walker_walk/bc.yaml`, `bc_dynamics.yaml`
@@ -160,7 +160,7 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 ### Policy / imagination (stage 4)
 
 - [ ] `imagine_rollout` in latent space (`imagination.py` stub)
-- [ ] `PolicyModule` — imagination RL on top of BC (`modules/policy.py`); value head with TD(λ) return targets
+- [ ] `RLModule` — imagination RL on top of BC (`modules/rl.py`); value head with TD(λ) return targets
 - [x] Config `configs/walker_walk/policy_imagination_pmpo.yaml` / `policy_imagination_ppo.yaml`
 
 ### Data & infra
@@ -226,6 +226,46 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 ```
 
 Tune `train.batch_size` if OOM; scale `data.num_workers` per GPU (e.g. 2–4).
+
+### Imagination RL (PMPO / PPO)
+
+Stage `rl` on frozen tokenizer + dynamics + BC reward; trains value + policy in latent imagination. Details: [`analysis/imagination_rl.md`](analysis/imagination_rl.md).
+
+**Prerequisites:** `tokenizer_ckpt` and `bc_ckpt` in the yaml (default: `bc_dynamics_10m/last.ckpt`). **Start from BC, not a corrupted RL checkpoint.**
+
+| Config | `imagination.policy_loss` | Default warmup | Notes |
+|--------|---------------------------|----------------|-------|
+| `policy_imagination_pmpo.yaml` | `pmpo` | 500 steps | `policy_lr: 1e-4`; `pmpo_min_balance_frac: 0.1` (**repo extension**, not in paper/jax — skips policy step when advantage signs are imbalanced; set `0` to match ref) |
+| `policy_imagination_ppo.yaml` | `ppo` | 200 steps | `normalize_advantages` default on |
+
+```bash
+# PMPO (Dreamer4 paper default)
+uv run dreamer4-train configs/walker_walk/policy_imagination_pmpo.yaml \
+  log.wandb=true
+
+# PPO (alternative)
+uv run dreamer4-train configs/walker_walk/policy_imagination_ppo.yaml \
+  log.wandb=true
+
+# 8 GPUs (server; headless MuJoCo)
+MUJOCO_GL=egl CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+  uv run dreamer4-train configs/walker_walk/policy_imagination_pmpo.yaml \
+  train.devices=8 train.batch_size=64 \
+  log.run_name=walker_walk/rl_pmpo log.wandb=true
+
+# Smoke (1 GPU, no wandb)
+uv run dreamer4-train configs/walker_walk/policy_imagination_ppo.yaml \
+  train.max_steps=100 train.devices=1 train.batch_size=32 \
+  train.val_every=100 log.wandb=false \
+  log.run_name=walker_walk/rl_ppo_smoke
+```
+
+`val/env_return_mean` from async env eval (`eval.env_eval: true`, every `train.val_every` steps). Override checkpoints:
+
+```bash
+uv run dreamer4-train configs/walker_walk/policy_imagination_pmpo.yaml \
+  bc_ckpt=logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt
+```
 
 ### Resume training
 
@@ -375,7 +415,7 @@ dreamer4/
     transformer_blocks.py
     tokenizer.py
     dynamics.py
-    policy.py         # AgentHeads, BCModel, bc_loss, SymExpTwoHot readouts
+    policy.py         # AgentHeads, PolicyModel, bc_loss, SymExpTwoHot readouts
   modules/            # Lightning modules per stage
     base.py
     tokenizer.py

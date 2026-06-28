@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from dreamer4.models.dynamics import sample_one_timestep_packed
-from dreamer4.models.policy import BCModel, POLICY_ENV_ACTION_SLOT, SquashedGaussianHead
+from dreamer4.models.policy import PolicyModel, POLICY_ENV_ACTION_SLOT, SquashedGaussianHead
 
 
 @dataclass
@@ -19,7 +19,7 @@ class ImaginationRollout:
 
 
 def imagine_latent_rollout(
-    bc_model: BCModel,
+    policy_model: PolicyModel,
     dynamics: nn.Module,
     packed_z_ctx: torch.Tensor,
     actions_ctx: torch.Tensor,
@@ -46,7 +46,7 @@ def imagine_latent_rollout(
         ctx_len = ctx
 
     with torch.no_grad():
-        h_seq = bc_model.agent_hidden(z_sliding, a_sliding, space_mode=bc_space_mode)
+        h_seq = policy_model.agent_hidden(z_sliding, a_sliding, space_mode=bc_space_mode)
     h = h_seq[:, -1]
 
     imagined_actions: list[torch.Tensor] = []
@@ -76,7 +76,7 @@ def imagine_latent_rollout(
             a_sliding = torch.cat([a_sliding, action.unsqueeze(1)], dim=1)
             if a_sliding.shape[1] > ctx_len:
                 a_sliding = a_sliding[:, -ctx_len:]
-            h = bc_model.agent_hidden(z_sliding, a_sliding, space_mode=bc_space_mode)[:, -1]
+            h = policy_model.agent_hidden(z_sliding, a_sliding, space_mode=bc_space_mode)[:, -1]
 
         imagined_hidden.append(h)
 

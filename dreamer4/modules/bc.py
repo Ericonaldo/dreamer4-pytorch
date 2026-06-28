@@ -27,7 +27,7 @@ class BCModule(BaseModule):
 
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
-        from dreamer4.models import BCModel, build_tokenizer, bc_loss
+        from dreamer4.models import PolicyModel, build_tokenizer, bc_loss
         from dreamer4.models.dynamics import pack_bottleneck_to_spatial
         from dreamer4.models.tokenizer import encode_images
 
@@ -49,7 +49,7 @@ class BCModule(BaseModule):
         self.patch_size = int(cfg.model.tokenizer.patch_size)
         self.action_horizon = int(cfg.model.get("action_horizon", 8))
 
-        self.model = BCModel(
+        self.model = PolicyModel(
             cfg.model.dynamics,
             n_latents=n_latents,
             latent_dim=latent_dim,

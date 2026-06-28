@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
 
-from dreamer4.models import BCModel, build_tokenizer
+from dreamer4.models import PolicyModel, build_tokenizer
 from dreamer4.models.policy import POLICY_ENV_ACTION_SLOT
 from dreamer4.models.dynamics import pack_bottleneck_to_spatial
 from dreamer4.models.tokenizer import encode_images
@@ -41,7 +41,7 @@ def load_bc_modules(
     *,
     model_state: dict[str, torch.Tensor] | None = None,
     tokenizer_state: dict[str, torch.Tensor] | None = None,
-) -> tuple[BCModel, nn.Module]:
+) -> tuple[PolicyModel, nn.Module]:
     tokenizer = build_tokenizer(cfg.model.tokenizer)
     if tokenizer_state is not None:
         tokenizer.load_state_dict(tokenizer_state, strict=True)
@@ -50,7 +50,7 @@ def load_bc_modules(
 
     n_latents = tokenizer.encoder.n_latents
     latent_dim = tokenizer.encoder.bottleneck_proj.out_features
-    model = BCModel(
+    model = PolicyModel(
         cfg.model.dynamics,
         n_latents=n_latents,
         latent_dim=latent_dim,
@@ -132,14 +132,14 @@ def resolve_eval_action_horizon(cfg: DictConfig) -> int:
 
 
 class BCPolicy:
-    """Online BC agent with optional batched env slots (encode → BCModel → MTP action)."""
+    """Online BC agent with optional batched env slots (encode → PolicyModel → MTP action)."""
 
     def __init__(
         self,
         cfg: DictConfig,
         device: torch.device,
         *,
-        model: BCModel | None = None,
+        model: PolicyModel | None = None,
         tokenizer: nn.Module | None = None,
         num_envs: int = 1,
     ):

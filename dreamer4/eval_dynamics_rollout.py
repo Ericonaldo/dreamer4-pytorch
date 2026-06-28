@@ -224,7 +224,7 @@ def _dynamics_model_cfg(cfg: DictConfig) -> tuple[dict[str, Any], int, str]:
         dyn = OmegaConf.to_container(cfg.model.dynamics, resolve=True)
         pf = int(cfg.model.dynamics.get("packing_factor", 1))
         stage = str(cfg.get("stage", ""))
-        prefix = "model.dynamics." if stage in ("bc", "bc_dynamics", "policy") else "model."
+        prefix = "model.dynamics." if stage in ("bc", "bc_dynamics", "rl") else "model."
         return dyn, pf, prefix
     raw = OmegaConf.to_container(cfg.model, resolve=True)
     pf = int(cfg.model.get("packing_factor", 1))

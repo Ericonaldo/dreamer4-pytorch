@@ -2,7 +2,7 @@ from dreamer4.modules.base import BaseModule
 from dreamer4.modules.bc import BCModule
 from dreamer4.modules.bc_dynamics import BCDynamicsModule
 from dreamer4.modules.dynamics import DynamicsModule
-from dreamer4.modules.policy import PolicyModule
+from dreamer4.modules.rl import RLModule
 from dreamer4.modules.tokenizer import TokenizerModule
 
 STAGES = {
@@ -10,7 +10,7 @@ STAGES = {
     "dynamics": DynamicsModule,
     "bc": BCModule,
     "bc_dynamics": BCDynamicsModule,
-    "policy": PolicyModule,
+    "rl": RLModule,
 }
 
 __all__ = [
@@ -18,7 +18,7 @@ __all__ = [
     "BCModule",
     "BCDynamicsModule",
     "DynamicsModule",
-    "PolicyModule",
+    "RLModule",
     "STAGES",
     "TokenizerModule",
 ]

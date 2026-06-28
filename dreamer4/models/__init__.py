@@ -6,7 +6,7 @@ from dreamer4.models.dynamics import (
 )
 from dreamer4.models.policy import (
     AgentHeads,
-    BCModel,
+    PolicyModel,
     bc_loss,
     imagination_rl_loss,
     pmpo_policy_loss,
@@ -24,7 +24,7 @@ from dreamer4.models.tokenizer import (
 
 __all__ = [
     "AgentHeads",
-    "BCModel",
+    "PolicyModel",
     "DynamicsModel",
     "Tokenizer",
     "bc_loss",

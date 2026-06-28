@@ -118,6 +118,21 @@ class SymExpTwoHotHead(nn.Module):
         return self.encoder.decode(logits)
 
 
+def init_value_head_from_reward_head(
+    value_head: SymExpTwoHotHead,
+    reward_head: SymExpTwoHotHead,
+) -> None:
+    """Warm-start value predictions from BC reward head MTP slot 0."""
+    with torch.no_grad():
+        rh_net = reward_head.net
+        vh_net = value_head.net
+        for i in range(len(vh_net) - 1):
+            vh_net[i].load_state_dict(rh_net[i].state_dict())
+        n_bins = value_head.encoder.num_bins
+        vh_net[-1].weight.copy_(rh_net[-1].weight[:n_bins])
+        vh_net[-1].bias.copy_(rh_net[-1].bias[:n_bins])
+
+
 def _cfg_dict(cfg: Mapping[str, Any] | DictConfig) -> dict[str, Any]:
     if isinstance(cfg, DictConfig):
         return OmegaConf.to_container(cfg, resolve=True)  # type: ignore[return-value]
@@ -295,8 +310,8 @@ class AgentHeads(nn.Module):
         )
 
 
-class BCModel(nn.Module):
-    """Dynamics backbone (wm_agent) + learned agent tokens + BC heads."""
+class PolicyModel(nn.Module):
+    """Dynamics backbone (wm_agent) + learned agent tokens + agent heads."""
 
     def __init__(
         self,
@@ -355,7 +370,7 @@ class BCModel(nn.Module):
             space_mode=space_mode or self.bc_space_mode,
         )
         if h_agent is None:
-            raise ValueError("BCModel requires n_agent > 0 on dynamics backbone")
+            raise ValueError("PolicyModel requires n_agent > 0 on dynamics backbone")
         return h_agent.mean(dim=2) # mean over n_agent tokens
 
     def forward(
@@ -455,20 +470,36 @@ def td_lambda_returns(
     return returns
 
 
-def pmpo_policy_loss(log_prob: torch.Tensor, advantages: torch.Tensor, alpha: float) -> torch.Tensor:
+def pmpo_policy_loss(
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    alpha: float,
+    *,
+    min_balance_frac: float = 0.1,
+) -> tuple[torch.Tensor, bool]:
     """PMPO: sign-only advantages; alpha balances positive vs negative action sets.
+
+    Returns (loss, applied). Skips the policy term when either advantage sign
+    is too rare (PMPO needs both D+ and D-; all-positive A destroys BC policy).
 
     Ref: https://github.com/edwhu/dreamer4-jax
     """
     flat_lp = log_prob.reshape(-1)
     flat_adv = advantages.reshape(-1)
+    n = flat_adv.numel()
+    if n == 0:
+        return log_prob.new_zeros(()), False
+
     mask_pos = flat_adv >= 0
     mask_neg = flat_adv < 0
-    n_pos = mask_pos.sum().clamp_min(1)
-    n_neg = mask_neg.sum().clamp_min(1)
+    n_pos = int(mask_pos.sum().item())
+    n_neg = int(mask_neg.sum().item())
+    if n_pos < min_balance_frac * n or n_neg < min_balance_frac * n:
+        return log_prob.new_zeros(()), False
+
     loss_neg = (1.0 - alpha) * (flat_lp * mask_neg).sum() / n_neg
     loss_pos = -alpha * (flat_lp * mask_pos).sum() / n_pos
-    return loss_neg + loss_pos
+    return loss_neg + loss_pos, True
 
 
 def ppo_policy_loss(
@@ -501,6 +532,9 @@ def imagination_rl_loss(
     policy_loss: str = "pmpo",
     alpha: float = 0.5,
     ppo_clip: float = 0.2,
+    normalize_advantages: bool = False,
+    pmpo_min_balance_frac: float = 0.1,
+    train_policy: bool = True,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
     Value CE on TD-λ targets + policy loss (PMPO or PPO) + KL(π || π_BC) on imagined trajectories.
@@ -523,14 +557,23 @@ def imagination_rl_loss(
     val_loss = value_head.loss(val_logits[:, :-1], td_returns).mean()
 
     advantages = (td_returns - values[:, :-1]).detach()
+    if normalize_advantages:
+        adv_std = advantages.std().clamp_min(1e-8)
+        advantages = (advantages - advantages.mean()) / adv_std
 
     h_pi = h[:, :H]
     _, mean_u, log_std = heads.policy(h_pi)
     slot = POLICY_ENV_ACTION_SLOT
 
     if policy_loss == "pmpo":
-        pi_loss = pmpo_policy_loss(imagined_log_prob, advantages, alpha)
+        pi_loss, pmpo_applied = pmpo_policy_loss(
+            imagined_log_prob,
+            advantages,
+            alpha,
+            min_balance_frac=pmpo_min_balance_frac,
+        )
         pi_clipfrac = None
+        apply_policy = train_policy and pmpo_applied
     elif policy_loss == "ppo":
         new_log_prob = heads.policy.log_prob(
             mean_u[:, :, slot],
@@ -543,6 +586,7 @@ def imagination_rl_loss(
             advantages,
             ppo_clip,
         )
+        apply_policy = train_policy
     else:
         raise ValueError(f"Unknown policy_loss: {policy_loss!r} (expected 'pmpo' or 'ppo')")
     _, mean_u_bc, log_std_bc = policy_prior(h_pi)
@@ -554,16 +598,21 @@ def imagination_rl_loss(
     ).mean()
     kl_loss = beta * kl
 
-    total = val_loss + pi_loss + kl_loss
+    total = val_loss + (pi_loss + kl_loss if apply_policy else 0.0)
     metrics: dict[str, float] = {
         "val_loss": float(val_loss.detach()),
-        "pi_loss": float(pi_loss.detach()),
-        "pi_kl_loss": float(kl_loss.detach()),
+        "pi_loss": float(pi_loss.detach()) if apply_policy else 0.0,
+        "pi_kl_loss": float(kl_loss.detach()) if apply_policy else 0.0,
         "mean_advantage": float(advantages.mean().detach()),
         "mean_td_return": float(td_returns.mean().detach()),
         "mean_reward_pred": float(rewards.mean().detach()),
         "mean_value": float(values.mean().detach()),
     }
+    if not apply_policy and train_policy:
+        metrics["pi_loss_raw"] = float(pi_loss.detach())
+        metrics["pi_kl_loss_raw"] = float(kl_loss.detach())
+    if policy_loss == "pmpo":
+        metrics["pi_pmpo_applied"] = float(apply_policy)
     if pi_clipfrac is not None:
         metrics["pi_clipfrac"] = float(pi_clipfrac)
     return total, metrics

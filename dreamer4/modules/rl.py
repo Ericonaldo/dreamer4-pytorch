@@ -11,18 +11,18 @@ from dreamer4.data import align_dynamics_batch
 from dreamer4.imagination import imagine_latent_rollout
 from dreamer4.modules.base import BaseModule
 from dreamer4.modules.bc import _load_state
-from dreamer4.models.policy import imagination_rl_loss, SymExpTwoHotEncoder, SymExpTwoHotHead
+from dreamer4.models.policy import imagination_rl_loss, init_value_head_from_reward_head, SymExpTwoHotEncoder, SymExpTwoHotHead
 from dreamer4.policy_agent import AsyncBCEval
 
 
-class PolicyModule(BaseModule):
+class RLModule(BaseModule):
     """Imagination RL: frozen dynamics + BC reward; train policy and value on imagined rollouts."""
 
-    stage = "policy"
+    stage = "rl"
 
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
-        from dreamer4.models import BCModel, build_tokenizer
+        from dreamer4.models import PolicyModel, build_tokenizer
         from dreamer4.models.dynamics import pack_bottleneck_to_spatial
         from dreamer4.models.tokenizer import encode_images
 
@@ -30,7 +30,7 @@ class PolicyModule(BaseModule):
         self._encode_images = encode_images
 
         imag = cfg.imagination
-        self.ctx_len = int(imag.context_length)
+        self.seq_len = int(cfg.data.seq_len)
         self.horizon = int(imag.horizon)
         self.flow_steps = int(imag.flow_steps)
         self.gamma = float(imag.gamma)
@@ -39,6 +39,10 @@ class PolicyModule(BaseModule):
         self.beta = float(imag.beta)
         self.policy_loss = str(imag.get("policy_loss", "pmpo"))
         self.ppo_clip = float(imag.get("ppo_clip", 0.2))
+        self.normalize_advantages = bool(imag.get("normalize_advantages", self.policy_loss == "ppo"))
+        self.policy_warmup_steps = int(imag.get("policy_warmup_steps", 200))
+        self.pmpo_min_balance_frac = float(imag.get("pmpo_min_balance_frac", 0.1))
+        self._policy_lr = float(imag.get("policy_lr", cfg.train.optimizer.lr))
 
         self.tokenizer = build_tokenizer(cfg.model.tokenizer)
         if cfg.get("tokenizer_ckpt"):
@@ -52,7 +56,7 @@ class PolicyModule(BaseModule):
         self.n_spatial = n_latents // self.packing_factor
         self.patch_size = int(cfg.model.tokenizer.patch_size)
 
-        self.model = BCModel(
+        self.model = PolicyModel(
             cfg.model.dynamics,
             n_latents=n_latents,
             latent_dim=latent_dim,
@@ -64,6 +68,7 @@ class PolicyModule(BaseModule):
             p.requires_grad_(False)
         for p in self.model.heads.reward_head.parameters():
             p.requires_grad_(False)
+        self.model.agent_tokens.requires_grad_(False)
 
         self.policy_prior = copy.deepcopy(self.model.heads.policy)
         for p in self.policy_prior.parameters():
@@ -81,15 +86,20 @@ class PolicyModule(BaseModule):
             value_enc,
             layers=value_layers,
         )
+        init_value_head_from_reward_head(self.value_head, self.model.heads.reward_head)
 
         self.bc_space_mode = self.model.bc_space_mode
         self._env_eval = AsyncBCEval()
 
     def configure_optimizers(self):
         opt_cfg = self.cfg.train.optimizer
-        params = [p for p in self.parameters() if p.requires_grad]
+        policy_lr = 0.0 if self.policy_warmup_steps > 0 else self._policy_lr
+        param_groups = [
+            {"params": list(self.value_head.parameters()), "name": "value"},
+            {"params": list(self.model.heads.policy.parameters()), "name": "policy", "lr": policy_lr},
+        ]
         optimizer = torch.optim.AdamW(
-            params,
+            param_groups,
             lr=opt_cfg.lr,
             betas=tuple(opt_cfg.betas),
             weight_decay=opt_cfg.weight_decay,
@@ -110,36 +120,61 @@ class PolicyModule(BaseModule):
         z = self._encode_images(self.tokenizer, image_bthwc, self.patch_size)
         return self._pack(z, self.n_spatial, self.packing_factor)
 
+    def _sample_context_window(
+        self,
+        image: torch.Tensor,
+        action: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        """Random suffix context ending at the window tail; length uniform in [1, min(seq_len, T)]."""
+        T = image.shape[1]
+        max_ctx = min(self.seq_len, T)
+        if max_ctx < 1:
+            raise ValueError(f"need at least 1 context frame, got T={T}, max_ctx={max_ctx}")
+        ctx_len = int(torch.randint(1, max_ctx + 1, (1,)).item())
+        start = T - ctx_len
+        return image[:, start:], action[:, start:], ctx_len
+
+    def on_train_batch_start(self, batch, batch_idx) -> None:
+        if self.policy_warmup_steps <= 0:
+            return
+        step = int(self.trainer.global_step)
+        if step != self.policy_warmup_steps:
+            return
+        opt = self.trainer.optimizers[0]
+        for pg in opt.param_groups:
+            if pg.get("name") == "policy":
+                pg["lr"] = self._policy_lr
+
     def _shared_step(self, batch, stage: str) -> torch.Tensor:
         if batch.image is None:
-            raise ValueError("Policy training requires images; set data.obs_mode=image or both")
+            raise ValueError("RL training requires images; set data.obs_mode=image or both")
 
-        prefix = "val" if stage == "val" else "rl"
+        prefix = "val" if stage == "val" else self.stage
         image, action, _ = align_dynamics_batch(batch.image, batch.action, batch.reward)
-        need = self.ctx_len + self.horizon + 1
-        if image.shape[1] < need:
+        if image.shape[1] < 2:
             raise ValueError(
-                f"seq_len too short for imagination: need {need - 1} transitions "
-                f"(context {self.ctx_len} + horizon {self.horizon}), got {image.shape[1] - 1}"
+                f"seq_len too short for imagination: need at least 2 aligned obs frames "
+                f"(data.seq_len >= 1 in transition mode), got {image.shape[1]}"
             )
 
-        with torch.no_grad():
-            packed_z = self._encode_packed(image)
+        image_ctx, action_ctx, ctx_len = self._sample_context_window(image, action)
 
-        z_ctx = packed_z[:, :self.ctx_len]
-        a_ctx = action[:, :self.ctx_len]
+        with torch.no_grad():
+            packed_z = self._encode_packed(image_ctx)
 
         rollout = imagine_latent_rollout(
             self.model,
             self.model.dynamics,
-            z_ctx,
-            a_ctx,
+            packed_z,
+            action_ctx,
             self.model.heads.policy,
             self.horizon,
             self.flow_steps,
             bc_space_mode=self.bc_space_mode,
-            ctx_len=self.ctx_len,
+            ctx_len=ctx_len,
         )
+
+        train_policy = stage != "train" or int(self.trainer.global_step) >= self.policy_warmup_steps
 
         loss, metrics = imagination_rl_loss(
             rollout.hidden,
@@ -154,6 +189,9 @@ class PolicyModule(BaseModule):
             policy_loss=self.policy_loss,
             alpha=self.alpha,
             ppo_clip=self.ppo_clip,
+            normalize_advantages=self.normalize_advantages,
+            pmpo_min_balance_frac=self.pmpo_min_balance_frac,
+            train_policy=train_policy,
         )
 
         for key, value in metrics.items():
@@ -184,7 +222,7 @@ class PolicyModule(BaseModule):
         try:
             from dreamer4.env import make_dmc_env  # noqa: F401
         except ImportError as exc:
-            rank_zero_warn(f"Skipping policy env eval (install dreamer4[dmc]): {exc}")
+            rank_zero_warn(f"Skipping RL env eval (install dreamer4[dmc]): {exc}")
             return
 
         step = int(self.trainer.global_step)
