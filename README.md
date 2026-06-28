@@ -280,7 +280,7 @@ uv run python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yam
 
 ### BC policy eval (online DMC)
 
-CLI: `dreamer4-eval` (`dreamer4/eval_policy.py`) — thin wrapper over `dreamer4/policy_agent.py` (`BCPolicy`, `run_bc_env_eval`, `AsyncBCEval`). Merges `configs/walker_walk/policy_eval.yaml` when present (`max_history: 16`, `episodes: 50`, `num_envs: 8`). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan from current obs each step, MTP slot 1); **L>1** = execute MTP slots `1..L` without re-encoding before the next replan (capped by `model.action_horizon - 1`).
+CLI: `dreamer4-eval` (`dreamer4/eval_policy.py`) — thin wrapper over `dreamer4/policy_agent.py` (`BCPolicy`, `run_bc_env_eval`, `AsyncBCEval`). Merges `configs/walker_walk/policy_eval.yaml` when present (`max_history: 16`, `episodes: 50`, `num_envs: 8`). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan + forward every env step); **L>1** = forward once then execute MTP slots `1..L` without re-forwarding, but still **encode every env frame** and commit actions into `(z, a)` history (capped by `model.action_horizon - 1`).
 
 **Multi-GPU**: `--gpus 8` splits 50 episodes across 8 GPUs; each GPU runs `eval.num_envs` parallel envs (8 in `bc_dynamics_10m.yaml`).
 

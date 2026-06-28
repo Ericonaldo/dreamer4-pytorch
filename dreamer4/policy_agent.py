@@ -179,14 +179,14 @@ class BCPolicy:
             self._a[slot].pop(0)
 
     def _commit_last_action(self, ids: list[int]) -> None:
-        """Record the last env action before appending a new replan observation."""
+        """Record the last env action before appending a new observation."""
         for i in ids:
             if self._z[i] and self._last_executed[i] is not None:
                 self._push_action(i, self._last_executed[i])
                 self._last_executed[i] = None
 
     def _aligned_actions(self, slot: int, t: int) -> torch.Tensor:
-        """(t, A) with a_0=0; a_k is the action into z_k for replan-aligned history."""
+        """(t, A) with a_0=0; a_k is the action that produced z_k."""
         out = torch.zeros(t, self.action_dim, device=self.device)
         n_transitions = min(len(self._a[slot]), max(0, t - 1))
         if n_transitions > 0:
@@ -194,8 +194,7 @@ class BCPolicy:
             out[1 : 1 + n_transitions] = a_hist
         return out
 
-    def _encode_and_append(self, images: np.ndarray, ids: list[int]) -> None:
-        self._commit_last_action(ids)
+    def _append_observations(self, images: np.ndarray, ids: list[int]) -> None:
         imgs = (
             torch.from_numpy(np.ascontiguousarray(images))
             .to(self.device)
@@ -211,6 +210,11 @@ class BCPolicy:
                 self._z[i].pop(0)
                 if self._a[i]:
                     self._a[i].pop(0)
+
+    def _observe_env(self, images: np.ndarray, ids: list[int]) -> None:
+        """Commit prior actions and encode current env frames into (z, a) history."""
+        self._commit_last_action(ids)
+        self._append_observations(images, ids)
 
     def _forward_mtp_actions(self, ids: list[int]) -> np.ndarray:
         z_seqs, a_seqs = [], []
@@ -237,6 +241,7 @@ class BCPolicy:
         need_forward: list[int] = []
         for j, i in enumerate(ids):
             if self._pending[i]:
+                self._observe_env(images[j : j + 1], [i])
                 action = self._pending[i].pop(0)
                 self._last_executed[i] = action
                 actions_out[i] = action
@@ -245,7 +250,7 @@ class BCPolicy:
 
         if need_forward:
             fwd_idx = [j for j, i in enumerate(ids) if i in need_forward]
-            self._encode_and_append(images[fwd_idx], need_forward)
+            self._observe_env(images[fwd_idx], need_forward)
             mtp = self._forward_mtp_actions(need_forward)
             for j, i in enumerate(need_forward):
                 step_actions = mtp[j]

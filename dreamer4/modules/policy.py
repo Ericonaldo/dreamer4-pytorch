@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import torch
+from lightning.pytorch.utilities import rank_zero_warn
 from omegaconf import DictConfig
 
 from dreamer4.data import align_dynamics_batch
@@ -10,6 +12,7 @@ from dreamer4.imagination import imagine_latent_rollout
 from dreamer4.modules.base import BaseModule
 from dreamer4.modules.bc import _load_state
 from dreamer4.models.policy import imagination_rl_loss, SymExpTwoHotEncoder, SymExpTwoHotHead
+from dreamer4.policy_agent import AsyncBCEval
 
 
 class PolicyModule(BaseModule):
@@ -78,6 +81,7 @@ class PolicyModule(BaseModule):
         )
 
         self.bc_space_mode = self.model.bc_space_mode
+        self._env_eval = AsyncBCEval()
 
     def configure_optimizers(self):
         opt_cfg = self.cfg.train.optimizer
@@ -157,3 +161,28 @@ class PolicyModule(BaseModule):
 
     def validation_step(self, batch, batch_idx):
         return self._shared_step(batch, "val")
+
+    def on_train_batch_end(self, *_) -> None:
+        if self.trainer.is_global_zero:
+            self._env_eval.poll(self)
+
+    def on_train_end(self) -> None:
+        if self.trainer.is_global_zero:
+            self._env_eval.drain(self)
+
+    def on_validation_epoch_end(self) -> None:
+        if not self.trainer.is_global_zero:
+            return
+
+        eval_cfg = self.cfg.get("eval", {})
+        if not eval_cfg.get("env_eval", True):
+            return
+        try:
+            from dreamer4.env import make_dmc_env  # noqa: F401
+        except ImportError as exc:
+            rank_zero_warn(f"Skipping policy env eval (install dreamer4[dmc]): {exc}")
+            return
+
+        step = int(self.trainer.global_step)
+        run_dir = Path(self.cfg.log.dir) / self.cfg.log.run_name
+        self._env_eval.start(step, self.cfg, self.model, self.tokenizer, run_dir)
