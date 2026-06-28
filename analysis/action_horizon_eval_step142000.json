@@ -1,0 +1,12 @@
+{
+  "checkpoint": "logs/walker_walk/bc_dynamics_10m/checkpoints/step-step=142000.ckpt",
+  "episodes_per_horizon": 8,
+  "gpu": 1,
+  "note": "Dense observe_env history (commit action + encode every env step); open-loop skips forward only",
+  "results": [
+    {"action_horizon": 1, "return_mean": 885.13, "return_std": 89.07, "return_min": 713.30, "return_max": 984.93},
+    {"action_horizon": 2, "return_mean": 824.25, "return_std": 219.91, "return_min": 369.65, "return_max": 977.10},
+    {"action_horizon": 4, "return_mean": 410.86, "return_std": 239.41, "return_min": 14.52, "return_max": 718.07},
+    {"action_horizon": 7, "return_mean": 289.82, "return_std": 141.97, "return_min": 31.11, "return_max": 434.22}
+  ]
+}
