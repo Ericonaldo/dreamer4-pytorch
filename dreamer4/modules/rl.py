@@ -90,6 +90,9 @@ class RLModule(BaseModule):
 
         self.bc_space_mode = self.model.bc_space_mode
         self._env_eval = AsyncBCEval()
+        if self.policy_warmup_steps > 0:
+            for p in self.model.heads.policy.parameters():
+                p.requires_grad_(False)
 
     def configure_optimizers(self):
         opt_cfg = self.cfg.train.optimizer
@@ -138,6 +141,9 @@ class RLModule(BaseModule):
         if self.policy_warmup_steps <= 0:
             return
         step = int(self.trainer.global_step)
+        policy_train = step >= self.policy_warmup_steps
+        for p in self.model.heads.policy.parameters():
+            p.requires_grad_(policy_train)
         if step != self.policy_warmup_steps:
             return
         opt = self.trainer.optimizers[0]
@@ -174,7 +180,10 @@ class RLModule(BaseModule):
             ctx_len=ctx_len,
         )
 
-        train_policy = stage != "train" or int(self.trainer.global_step) >= self.policy_warmup_steps
+        train_policy = (
+            stage == "train"
+            and int(self.trainer.global_step) >= self.policy_warmup_steps
+        )
 
         loss, metrics = imagination_rl_loss(
             rollout.hidden,
@@ -196,9 +205,10 @@ class RLModule(BaseModule):
 
         for key, value in metrics.items():
             prog = stage == "train" and key in ("val_loss", "pi_loss", "mean_td_return")
-            self.log(f"{prefix}/{key}", value, prog_bar=prog, sync_dist=True)
+            # Manual validation in ValidateEveryNSteps is outside trainer.validate(); sync_dist can DDP-deadlock.
+            self.log(f"{prefix}/{key}", value, prog_bar=prog, sync_dist=stage == "train")
         if stage == "val":
-            self.log("val/loss", loss, sync_dist=True)
+            self.log("val/loss", loss, sync_dist=False)
         return loss
 
     def validation_step(self, batch, batch_idx):

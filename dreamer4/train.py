@@ -25,6 +25,7 @@ class ValidateEveryNSteps(Callback):
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
         step = trainer.global_step
         if step > 0 and step % self.every_n_steps == 0:
+            trainer.strategy.barrier()
             pl_module.eval()
             n_batches = max(1, min(len(self.val_dataloader), self.limit_batches))
             pl_module._val_n_batches = n_batches
@@ -37,6 +38,7 @@ class ValidateEveryNSteps(Callback):
             pl_module.on_validation_epoch_end()
             pl_module._val_n_batches = None
             pl_module.train()
+            trainer.strategy.barrier()
 
 
 class KeepLastCheckpoints(Callback):

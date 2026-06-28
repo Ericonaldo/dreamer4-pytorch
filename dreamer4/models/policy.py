@@ -562,41 +562,44 @@ def imagination_rl_loss(
         advantages = (advantages - advantages.mean()) / adv_std
 
     h_pi = h[:, :H]
-    _, mean_u, log_std = heads.policy(h_pi)
     slot = POLICY_ENV_ACTION_SLOT
 
-    if policy_loss == "pmpo":
-        pi_loss, pmpo_applied = pmpo_policy_loss(
-            imagined_log_prob,
-            advantages,
-            alpha,
-            min_balance_frac=pmpo_min_balance_frac,
-        )
-        pi_clipfrac = None
-        apply_policy = train_policy and pmpo_applied
-    elif policy_loss == "ppo":
-        new_log_prob = heads.policy.log_prob(
+    policy_ctx = torch.enable_grad() if train_policy else torch.no_grad()
+    with policy_ctx:
+        _, mean_u, log_std = heads.policy(h_pi)
+
+        if policy_loss == "pmpo":
+            pi_loss, pmpo_applied = pmpo_policy_loss(
+                imagined_log_prob,
+                advantages,
+                alpha,
+                min_balance_frac=pmpo_min_balance_frac,
+            )
+            pi_clipfrac = None
+            apply_policy = train_policy and pmpo_applied
+        elif policy_loss == "ppo":
+            new_log_prob = heads.policy.log_prob(
+                mean_u[:, :, slot],
+                log_std[:, :, slot],
+                imagined_actions,
+            )
+            pi_loss, pi_clipfrac = ppo_policy_loss(
+                new_log_prob,
+                imagined_log_prob.detach(),
+                advantages,
+                ppo_clip,
+            )
+            apply_policy = train_policy
+        else:
+            raise ValueError(f"Unknown policy_loss: {policy_loss!r} (expected 'pmpo' or 'ppo')")
+        _, mean_u_bc, log_std_bc = policy_prior(h_pi)
+        kl = heads.policy.gaussian_kl(
             mean_u[:, :, slot],
             log_std[:, :, slot],
-            imagined_actions,
-        )
-        pi_loss, pi_clipfrac = ppo_policy_loss(
-            new_log_prob,
-            imagined_log_prob.detach(),
-            advantages,
-            ppo_clip,
-        )
-        apply_policy = train_policy
-    else:
-        raise ValueError(f"Unknown policy_loss: {policy_loss!r} (expected 'pmpo' or 'ppo')")
-    _, mean_u_bc, log_std_bc = policy_prior(h_pi)
-    kl = heads.policy.gaussian_kl(
-        mean_u[:, :, slot],
-        log_std[:, :, slot],
-        mean_u_bc[:, :, slot],
-        log_std_bc[:, :, slot],
-    ).mean()
-    kl_loss = beta * kl
+            mean_u_bc[:, :, slot],
+            log_std_bc[:, :, slot],
+        ).mean()
+        kl_loss = beta * kl
 
     total = val_loss + (pi_loss + kl_loss if apply_policy else 0.0)
     metrics: dict[str, float] = {

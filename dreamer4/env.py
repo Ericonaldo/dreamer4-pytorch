@@ -120,6 +120,33 @@ class DMC(Env):
                 assert np.isfinite(obs[key]).all(), (key, obs[key])
         return obs
 
+    def close(self) -> None:
+        if getattr(self, "_dmenv", None) is None:
+            return
+        try:
+            _free_mujoco_render_context(self._dmenv.physics)
+        except Exception:
+            pass
+        self._dmenv = None
+        self._env = None
+
+
+def _free_mujoco_render_context(physics) -> None:
+    """Release EGL/OSMesa render context before process exit (avoids MjrContext __del__ errors)."""
+    if physics is None:
+        return
+    ctx = getattr(physics, "context", None)
+    if ctx is None:
+        return
+    try:
+        ctx.free()
+    except (AttributeError, RuntimeError, TypeError):
+        pass
+    try:
+        physics.context = None
+    except Exception:
+        pass
+
 
 class DMCEnvAdapter:
     """Thin adapter: ``reset()`` / ``step(np.ndarray)`` for policy eval scripts."""
@@ -146,6 +173,11 @@ class DMCEnvAdapter:
         if self._max_episode_steps is not None and self._step_count >= self._max_episode_steps:
             obs["is_last"] = True
         return obs
+
+    def close(self) -> None:
+        if self._env is not None:
+            self._env.close()
+            self._env = None
 
 
 def make_dmc_env(

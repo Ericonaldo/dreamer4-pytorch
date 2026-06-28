@@ -353,6 +353,11 @@ def _rollout_on_device(
             if obs[i]["is_last"]:
                 stats.append(EpisodeStats(return_=rets[i], length=int(lens[i])))
                 done[i] = True
+    for env in envs:
+        try:
+            env.close()
+        except Exception:
+            pass
     return stats
 
 
@@ -365,6 +370,8 @@ def _worker(
     out_queue,
 ) -> None:
     os.environ.setdefault("MUJOCO_GL", "egl")
+    if gpu_id is not None:
+        os.environ["MUJOCO_EGL_DEVICE_ID"] = str(gpu_id)
     cfg = OmegaConf.create(cfg_dict)
     if gpu_id is not None and torch.cuda.is_available():
         torch.cuda.set_device(gpu_id)
@@ -475,6 +482,8 @@ def run_bc_policy_video(
 ) -> dict[str, Any]:
     """Record one online env episode as mp4 (BC policy)."""
     os.environ.setdefault("MUJOCO_GL", "egl")
+    if gpu_id is not None and torch.cuda.is_available():
+        os.environ["MUJOCO_EGL_DEVICE_ID"] = str(gpu_id)
     env = _make_eval_env(cfg)
 
     if gpu_id is not None and torch.cuda.is_available():
@@ -502,6 +511,11 @@ def run_bc_policy_video(
         frames.append(obs["image"].copy())
         ep_return += float(obs["reward"])
         ep_len += 1
+
+    try:
+        env.close()
+    except Exception:
+        pass
 
     frames_arr = np.stack(frames, axis=0)
     if annotate_steps:
@@ -531,6 +545,7 @@ def _async_entry(
     gpu_ids: list[int | None],
     out_queue,
 ) -> None:
+    os.environ.setdefault("MUJOCO_GL", "egl")
     try:
         cfg = OmegaConf.create(cfg_dict)
         metrics = run_bc_env_eval(
