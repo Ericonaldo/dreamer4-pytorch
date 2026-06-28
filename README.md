@@ -229,7 +229,7 @@ Tune `train.batch_size` if OOM; scale `data.num_workers` per GPU (e.g. 2–4).
 
 ### Imagination RL (PMPO / PPO)
 
-Stage `rl` on frozen tokenizer + dynamics + BC reward; trains value + policy in latent imagination. Details: [`analysis/imagination_rl.md`](analysis/imagination_rl.md).
+Stage `rl` on frozen tokenizer + dynamics + BC reward; trains value + policy in latent imagination. Optional local notes: `analysis/imagination_rl.md` (gitignored).
 
 **Prerequisites:** `tokenizer_ckpt` and `bc_ckpt` in the yaml (default: `bc_dynamics_10m/last.ckpt`). **Start from BC, not a corrupted RL checkpoint.**
 
@@ -320,7 +320,7 @@ uv run python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yam
 
 ### BC policy eval (online DMC)
 
-CLI: `dreamer4-eval` (`dreamer4/eval_policy.py`) — thin wrapper over `dreamer4/policy_agent.py` (`BCPolicy`, `run_bc_env_eval`, `AsyncBCEval`). Merges `configs/walker_walk/policy_eval.yaml` when present (`max_history: 16`, `episodes: 50`, `num_envs: 8`). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan + forward every env step); **L>1** = forward once then execute MTP slots `1..L` without re-forwarding, but still **encode every env frame** and commit actions into `(z, a)` history (capped by `model.action_horizon - 1`). Example sweep chart: `analysis/action_horizon_eval_step142000.png` (regenerate via `python -m dreamer4.plot_action_horizon_eval` after updating the JSON).
+CLI: `dreamer4-eval` (`dreamer4/eval_policy.py`) — thin wrapper over `dreamer4/policy_agent.py` (`BCPolicy`, `run_bc_env_eval`, `AsyncBCEval`). Merges `configs/walker_walk/policy_eval.yaml` when present (`max_history: 16`, `episodes: 50`, `num_envs: 8`). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan + forward every env step); **L>1** = forward once then execute MTP slots `1..L` without re-forwarding, but still **encode every env frame** and commit actions into `(z, a)` history (capped by `model.action_horizon - 1`). Regenerate horizon sweep charts with `python -m dreamer4.plot_action_horizon_eval`.
 
 **Multi-GPU**: `--gpus 8` splits 50 episodes across 8 GPUs; each GPU runs `eval.num_envs` parallel envs (8 in `bc_dynamics_10m.yaml`).
 
