@@ -35,8 +35,10 @@ class PolicyModule(BaseModule):
         self.flow_steps = int(imag.flow_steps)
         self.gamma = float(imag.gamma)
         self.lambda_ = float(imag.lambda_)
-        self.alpha = float(imag.alpha)
+        self.alpha = float(imag.get("alpha", 0.5))
         self.beta = float(imag.beta)
+        self.policy_loss = str(imag.get("policy_loss", "pmpo"))
+        self.ppo_clip = float(imag.get("ppo_clip", 0.2))
 
         self.tokenizer = build_tokenizer(cfg.model.tokenizer)
         if cfg.get("tokenizer_ckpt"):
@@ -112,7 +114,7 @@ class PolicyModule(BaseModule):
         if batch.image is None:
             raise ValueError("Policy training requires images; set data.obs_mode=image or both")
 
-        prefix = "val" if stage == "val" else self.stage
+        prefix = "val" if stage == "val" else "rl"
         image, action, _ = align_dynamics_batch(batch.image, batch.action, batch.reward)
         need = self.ctx_len + self.horizon + 1
         if image.shape[1] < need:
@@ -148,8 +150,10 @@ class PolicyModule(BaseModule):
             self.value_head,
             gamma=self.gamma,
             lambda_=self.lambda_,
-            alpha=self.alpha,
             beta=self.beta,
+            policy_loss=self.policy_loss,
+            alpha=self.alpha,
+            ppo_clip=self.ppo_clip,
         )
 
         for key, value in metrics.items():

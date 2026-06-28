@@ -2,7 +2,7 @@
 
 Minimal PyTorch Lightning reimplementation of [Dreamer 4](https://arxiv.org/abs/2509.24527) for DMC Walker Walk.
 
-References: [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4), [edwhu/dreamer4-jax](https://github.com/edwhu/dreamer4-jax), [lucidrains/dreamer4](https://github.com/lucidrains/dreamer4).
+References: [Dreamer v4 Paper (arXiv)](https://arxiv.org/pdf/2509.24527), [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4)(only tokenzier + dynamics training), [edwhu/dreamer4-jax](https://github.com/edwhu/dreamer4-jax) (no imagine rl), [lucidrains/dreamer4](https://github.com/lucidrains/dreamer4).
 
 ## Training stages
 
@@ -12,7 +12,7 @@ Three-stage pipeline (paper-aligned); configs under `configs/walker_walk/`:
 |-------|------|-------------|-------------------|
 | **1** | **Tokenizer** | Causal patch **encoder + decoder**; block-causal transformer with **MAE** random patch masking → latent bottleneck `z_t` + recon loss | `tokenizer.yaml`, `tokenizer_5m.yaml` |
 | **2** | **Pretraining** | **BC + dynamics** on frozen tokenizer encode: joint **flow matching** (`wm_dynamics`) and **BC** action/reward MTP (`wm_agent`) on one backbone; optional `dynamics.yaml` warm start | `bc_dynamics.yaml`, `bc_dynamics_10m.yaml` (also `bc.yaml` for BC-only finetune) |
-| **3** | **Posttraining** | **RL** in latent imagination: rollout with learned dynamics + policy, value head on TD(λ) returns (not BC MTP) | `policy_imagination.yaml` |
+| **3** | **Posttraining** | **RL** in latent imagination: rollout with learned dynamics + policy, value head on TD(λ) returns (not BC MTP) | `policy_imagination_pmpo.yaml` / `policy_imagination_ppo.yaml` |
 
 Stage 1 decoder is dropped at inference for downstream stages (encode-only). Stage 3 uses imagined trajectories, not dataset BC labels.
 
@@ -161,7 +161,7 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 
 - [ ] `imagine_rollout` in latent space (`imagination.py` stub)
 - [ ] `PolicyModule` — imagination RL on top of BC (`modules/policy.py`); value head with TD(λ) return targets
-- [ ] Config `configs/walker_walk/policy.yaml`
+- [x] Config `configs/walker_walk/policy_imagination_pmpo.yaml` / `policy_imagination_ppo.yaml`
 
 ### Data & infra
 
@@ -193,7 +193,7 @@ See **Training stages** above. Runnable configs:
 |-------|--------|-------|
 | 1 Tokenizer | `tokenizer.yaml`, `tokenizer_5m.yaml` | MAE encoder–decoder |
 | 2 Pretraining | `bc_dynamics.yaml`, `bc_dynamics_10m.yaml` | Joint flow + BC; optional `dynamics.yaml` init |
-| 3 Posttraining | `policy.yaml` | Imagination RL *(planned)* |
+| 3 Posttraining | `policy_imagination_pmpo.yaml` / `policy_imagination_ppo.yaml` | Imagination RL (PMPO or PPO) + async env eval |
 
 ```bash
 # Full model
@@ -400,5 +400,6 @@ configs/walker_walk/
   bc_dynamics.yaml
   bc_dynamics_10m.yaml
   policy_eval.yaml
-  policy.yaml
+  policy_imagination_pmpo.yaml   # imagination.policy_loss: pmpo
+  policy_imagination_ppo.yaml    # imagination.policy_loss: ppo
 ```

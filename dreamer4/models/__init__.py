@@ -4,7 +4,15 @@ from dreamer4.models.dynamics import (
     pack_bottleneck_to_spatial,
     run_dynamics_rollout_eval,
 )
-from dreamer4.models.policy import AgentHeads, BCModel, bc_loss, imagination_rl_loss, pmpo_policy_loss, td_lambda_returns
+from dreamer4.models.policy import (
+    AgentHeads,
+    BCModel,
+    bc_loss,
+    imagination_rl_loss,
+    pmpo_policy_loss,
+    ppo_policy_loss,
+    td_lambda_returns,
+)
 from dreamer4.models.tokenizer import (
     Tokenizer,
     build_tokenizer,
@@ -26,6 +34,7 @@ __all__ = [
     "imagination_rl_loss",
     "pack_bottleneck_to_spatial",
     "pmpo_policy_loss",
+    "ppo_policy_loss",
     "run_dynamics_rollout_eval",
     "td_lambda_returns",
     "recon_panel_uint8",

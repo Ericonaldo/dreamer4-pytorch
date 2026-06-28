@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from dreamer4.models.dynamics import sample_one_timestep_packed
-from dreamer4.models.policy import BCModel, SquashedGaussianHead
+from dreamer4.models.policy import BCModel, POLICY_ENV_ACTION_SLOT, SquashedGaussianHead
 
 
 @dataclass
@@ -56,8 +56,9 @@ def imagine_latent_rollout(
     for _ in range(horizon):
         h_in = h.detach().unsqueeze(1)
         action_mtp, log_p_mtp, _, _ = policy.sample(h_in)
-        action = action_mtp[:, 0, 0]
-        log_p = log_p_mtp[:, 0, 0]
+        slot = POLICY_ENV_ACTION_SLOT
+        action = action_mtp[:, 0, slot]
+        log_p = log_p_mtp[:, 0, slot]
         imagined_actions.append(action)
         imagined_log_prob.append(log_p)
 

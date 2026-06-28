@@ -83,6 +83,8 @@ class DynamicsModel(nn.Module):
         self.dropout = float(raw.get("dropout", 0.0))
         self.time_every = int(raw.get("time_every", 4))
         self.scale_pos_embeds = bool(raw.get("scale_pos_embeds", True))
+        # space_modes: masks registered on the transformer; space_mode: default when forward() omits it
+        # (flow rollout / sample_one_timestep_packed never pass space_mode — they use space_mode).
         space_modes_raw = raw.get("space_modes")
         if space_modes_raw is not None:
             self.space_modes = tuple(str(m) for m in space_modes_raw)
@@ -92,7 +94,7 @@ class DynamicsModel(nn.Module):
             self.space_modes = (self.space_mode,)
         if self.space_mode not in self.space_modes:
             raise ValueError(
-                f"space_mode {self.space_mode!r} must be one of space_modes {self.space_modes}"
+                f"dynamics.space_mode {self.space_mode!r} must be listed in space_modes {self.space_modes}"
             )
         self.packing_factor = int(raw.get("packing_factor", 1))
         self.n_register = int(raw.get("n_register", 0))

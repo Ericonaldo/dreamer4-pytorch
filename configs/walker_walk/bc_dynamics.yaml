@@ -41,6 +41,7 @@ model:
     n_agent: 1
     action_dim: 6
     space_modes: [wm_dynamics, wm_agent]  # flow uses wm_dynamics, BC uses wm_agent (auto)
+    space_mode: wm_dynamics  # default for flow / rollout when space_mode omitted
   action_horizon: 8
   policy_hidden: 256
   reward_hidden: 256

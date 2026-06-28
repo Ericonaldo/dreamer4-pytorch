@@ -19,6 +19,7 @@ import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
 
 from dreamer4.models import BCModel, build_tokenizer
+from dreamer4.models.policy import POLICY_ENV_ACTION_SLOT
 from dreamer4.models.dynamics import pack_bottleneck_to_spatial
 from dreamer4.models.tokenizer import encode_images
 
@@ -227,8 +228,8 @@ class BCPolicy:
         a_batch = _pad_stack(a_seqs)
         outputs = self.model(z_batch, a_batch)
         # Slots 1..L predict a_{t+1}..a_{t+L} for open-loop env steps after observing s_t.
-        end = 1 + self.open_loop_steps
-        return outputs.action[:, -1, 1:end].float().cpu().numpy().astype(np.float32)
+        end = POLICY_ENV_ACTION_SLOT + self.open_loop_steps
+        return outputs.action[:, -1, POLICY_ENV_ACTION_SLOT:end].float().cpu().numpy().astype(np.float32)
 
     @torch.no_grad()
     def act(self, images: np.ndarray, ids: list[int] | None = None) -> np.ndarray:

@@ -13,6 +13,10 @@ from omegaconf import DictConfig, OmegaConf
 from torch.distributions import Normal
 
 
+# MTP slot l at aligned time t predicts action a_{t+l}; from state s_t execute a_{t+1} (slot 1).
+POLICY_ENV_ACTION_SLOT = 1
+
+
 def symexp(x: torch.Tensor) -> torch.Tensor:
     return torch.sign(x) * torch.expm1(x.abs())
 
@@ -176,7 +180,7 @@ class SquashedGaussianHead(nn.Module):
     def sample(
         self, h_t: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Stochastic squashed action + log prob; MTP slot 0 env action (B, T, A)."""
+        """Stochastic squashed action + log prob per MTP slot (B, T, L, A)."""
         _, mean_u, log_std = self.forward(h_t)
         std = log_std.exp()
         u = mean_u + std * torch.randn_like(mean_u)
@@ -311,14 +315,11 @@ class BCModel(nn.Module):
         self.d_model = int(raw["embed_dim"])
 
         self.dynamics = DynamicsModel(raw, n_latents=n_latents, latent_dim=latent_dim)
-        modes = set(self.dynamics.space_modes)
-        if {"wm_dynamics", "wm_agent"}.issubset(modes):
-            default_dyn, default_bc = "wm_dynamics", "wm_agent"
-        else:
-            default_dyn = self.dynamics.space_mode
-            default_bc = "wm_agent" if "wm_agent" in modes else self.dynamics.space_mode
-        self.dynamics_space_mode = str(raw.get("dynamics_space_mode", default_dyn))
-        self.bc_space_mode = str(raw.get("bc_space_mode", default_bc))
+
+        self.dynamics_space_mode = str(
+            raw.get("dynamics_space_mode", self.dynamics.space_mode)
+        )
+        self.bc_space_mode = str(raw.get("bc_space_mode", "wm_agent"))
         self.agent_tokens = nn.Parameter(torch.empty(self.n_agent, self.d_model))
         nn.init.normal_(self.agent_tokens, std=0.02)
         heads = _cfg_dict(heads_cfg)
@@ -355,7 +356,7 @@ class BCModel(nn.Module):
         )
         if h_agent is None:
             raise ValueError("BCModel requires n_agent > 0 on dynamics backbone")
-        return h_agent.mean(dim=2)
+        return h_agent.mean(dim=2) # mean over n_agent tokens
 
     def forward(
         self,
@@ -446,16 +447,19 @@ def td_lambda_returns(
     """
     B, H = rewards.shape
     returns = torch.zeros_like(rewards)
-    g_next = values[:, -1]
+    g_next = values[:, -1].detach()
     for t in reversed(range(H)):
-        v_next = values[:, t + 1]
-        g_next = rewards[:, t] + gamma * ((1.0 - lambda_) * v_next + lambda_ * g_next)
+        v_next = values[:, t + 1].detach()
+        g_next = rewards[:, t] + gamma * ((1.0 - lambda_) * v_next + lambda_ * g_next.detach())
         returns[:, t] = g_next
     return returns
 
 
 def pmpo_policy_loss(log_prob: torch.Tensor, advantages: torch.Tensor, alpha: float) -> torch.Tensor:
-    """PMPO: sign-only advantages; alpha balances positive vs negative action sets."""
+    """PMPO: sign-only advantages; alpha balances positive vs negative action sets.
+
+    Ref: https://github.com/edwhu/dreamer4-jax
+    """
     flat_lp = log_prob.reshape(-1)
     flat_adv = advantages.reshape(-1)
     mask_pos = flat_adv >= 0
@@ -465,6 +469,22 @@ def pmpo_policy_loss(log_prob: torch.Tensor, advantages: torch.Tensor, alpha: fl
     loss_neg = (1.0 - alpha) * (flat_lp * mask_neg).sum() / n_neg
     loss_pos = -alpha * (flat_lp * mask_pos).sum() / n_pos
     return loss_neg + loss_pos
+
+
+def ppo_policy_loss(
+    log_prob: torch.Tensor,
+    old_log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    clip_eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Clipped PPO surrogate on imagined actions; returns loss and clip fraction."""
+    ratio = torch.exp(log_prob - old_log_prob)
+    surr1 = ratio * advantages
+    surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantages
+    loss = -torch.min(surr1, surr2).mean()
+    with torch.no_grad():
+        clipfrac = ((ratio - 1.0).abs() > clip_eps).float().mean()
+    return loss, clipfrac
 
 
 def imagination_rl_loss(
@@ -477,15 +497,17 @@ def imagination_rl_loss(
     *,
     gamma: float,
     lambda_: float,
-    alpha: float,
     beta: float,
+    policy_loss: str = "pmpo",
+    alpha: float = 0.5,
+    ppo_clip: float = 0.2,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
-    Value CE on TD-λ targets + PMPO policy loss + KL(π || π_BC) on imagined trajectories.
+    Value CE on TD-λ targets + policy loss (PMPO or PPO) + KL(π || π_BC) on imagined trajectories.
 
     hidden: (B, H+1, D) agent states s_0..s_H (s_0 = last context state)
     imagined_actions: (B, H, A) policy actions a_1..a_H
-    imagined_log_prob: (B, H) log π(a_t | s_{t-1})
+    imagined_log_prob: (B, H) log π(a_t | s_{t-1}) at sampling time
     """
     h = hidden.detach()
     H = imagined_actions.shape[1]
@@ -501,21 +523,39 @@ def imagination_rl_loss(
     val_loss = value_head.loss(val_logits[:, :-1], td_returns).mean()
 
     advantages = (td_returns - values[:, :-1]).detach()
-    pi_loss = pmpo_policy_loss(imagined_log_prob, advantages, alpha)
 
     h_pi = h[:, :H]
     _, mean_u, log_std = heads.policy(h_pi)
+    slot = POLICY_ENV_ACTION_SLOT
+
+    if policy_loss == "pmpo":
+        pi_loss = pmpo_policy_loss(imagined_log_prob, advantages, alpha)
+        pi_clipfrac = None
+    elif policy_loss == "ppo":
+        new_log_prob = heads.policy.log_prob(
+            mean_u[:, :, slot],
+            log_std[:, :, slot],
+            imagined_actions,
+        )
+        pi_loss, pi_clipfrac = ppo_policy_loss(
+            new_log_prob,
+            imagined_log_prob.detach(),
+            advantages,
+            ppo_clip,
+        )
+    else:
+        raise ValueError(f"Unknown policy_loss: {policy_loss!r} (expected 'pmpo' or 'ppo')")
     _, mean_u_bc, log_std_bc = policy_prior(h_pi)
     kl = heads.policy.gaussian_kl(
-        mean_u[:, :, 0],
-        log_std[:, :, 0],
-        mean_u_bc[:, :, 0],
-        log_std_bc[:, :, 0],
+        mean_u[:, :, slot],
+        log_std[:, :, slot],
+        mean_u_bc[:, :, slot],
+        log_std_bc[:, :, slot],
     ).mean()
     kl_loss = beta * kl
 
     total = val_loss + pi_loss + kl_loss
-    metrics = {
+    metrics: dict[str, float] = {
         "val_loss": float(val_loss.detach()),
         "pi_loss": float(pi_loss.detach()),
         "pi_kl_loss": float(kl_loss.detach()),
@@ -524,4 +564,6 @@ def imagination_rl_loss(
         "mean_reward_pred": float(rewards.mean().detach()),
         "mean_value": float(values.mean().detach()),
     }
+    if pi_clipfrac is not None:
+        metrics["pi_clipfrac"] = float(pi_clipfrac)
     return total, metrics

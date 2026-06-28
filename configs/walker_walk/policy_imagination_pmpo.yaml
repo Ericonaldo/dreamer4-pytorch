@@ -2,7 +2,7 @@ stage: policy
 
 data:
   path: data/dmc_walker_walk
-  seq_len: 32  # context_length + horizon + 1 obs frames
+  seq_len: 16  # context_length + horizon + 1 obs frames
   obs_mode: image
   num_workers: 8
   val_fraction: 0.05
@@ -42,6 +42,7 @@ model:
     n_agent: 1
     action_dim: 6
     space_modes: [wm_dynamics, wm_agent]
+    space_mode: wm_dynamics
   action_horizon: 8
   policy_hidden: 512
   reward_hidden: 512
@@ -59,15 +60,16 @@ imagination:
   flow_steps: 8
   gamma: 0.997
   lambda_: 0.95
+  policy_loss: pmpo  # ref edwhu/dreamer4-jax
   alpha: 0.5
   beta: 0.3
 
 train:
   batch_size: 32
-  max_steps: 50_000
-  checkpoint_every: 2000
+  max_steps: 10_000
+  checkpoint_every: 1000
   checkpoint_keep_last: 5
-  val_every: 1000
+  val_every: 100
   val_max_batches: 8
   devices: 8
   accelerator: gpu
@@ -81,7 +83,7 @@ train:
 
 log:
   dir: logs
-  run_name: walker_walk/policy_imagination
+  run_name: walker_walk/rl_pmpo
   every_n_steps: 50
   wandb: true
   project: dreamer4-walker-walk
