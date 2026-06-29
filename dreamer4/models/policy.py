@@ -477,28 +477,14 @@ def td_lambda_returns(
     return returns
 
 
-def _pmpo_advantage_balance_ok(flat_adv: torch.Tensor, min_balance_frac: float) -> bool:
-    n = flat_adv.numel()
-    if n == 0:
-        return False
-    n_pos = int((flat_adv >= 0).sum().item())
-    n_neg = n - n_pos
-    return n_pos >= min_balance_frac * n and n_neg >= min_balance_frac * n
-
-
 def pmpo_policy_loss(
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
     alpha: float,
-    *,
-    min_balance_frac: float = 0.1,
-) -> tuple[torch.Tensor, bool]:
+) -> torch.Tensor:
     """PMPO: sign-only advantages; alpha balances positive vs negative action sets.
 
-    Returns (loss, applied). Always computes loss for the autograd graph; caller
-    multiplies by weight 0 when applied is False (imbalanced advantage signs).
-
-    Ref: https://github.com/edwhu/dreamer4-jax
+    Ref: Dreamerv4 paper, https://github.com/edwhu/dreamer4-jax
     """
     flat_lp = log_prob.reshape(-1)
     flat_adv = advantages.reshape(-1)
@@ -506,11 +492,10 @@ def pmpo_policy_loss(
     mask_neg = flat_adv < 0
     n_pos = int(mask_pos.sum().item())
     n_neg = int(mask_neg.sum().item())
-    # Safe denominators: empty mask → sum is 0, loss term is 0.
+    # Safe denominators: empty mask → sum is 0, loss term is 0 (matches jax ref).
     loss_neg = (1.0 - alpha) * (flat_lp * mask_neg).sum() / max(n_neg, 1)
     loss_pos = -alpha * (flat_lp * mask_pos).sum() / max(n_pos, 1)
-    applied = _pmpo_advantage_balance_ok(flat_adv, min_balance_frac)
-    return loss_neg + loss_pos, applied
+    return loss_neg + loss_pos
 
 
 def imagination_rl_value_loss(
@@ -561,10 +546,9 @@ def imagination_rl_policy_loss(
     *,
     beta: float,
     alpha: float = 0.5,
-    pmpo_min_balance_frac: float = 0.1,
     train_policy: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor, bool, dict[str, float]]:
-    """PMPO policy + KL loss on imagined trajectories; returns (pi_loss, kl_loss, apply_policy, metrics)."""
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+    """PMPO policy + KL loss on imagined trajectories; returns (pi_loss, kl_loss, metrics)."""
     slot = POLICY_ENV_ACTION_SLOT
     imagined_actions_f = imagined_actions.detach().float()
 
@@ -579,13 +563,7 @@ def imagination_rl_policy_loss(
             log_std[:, :, slot],
             imagined_actions_f,
         )
-        pi_loss, pmpo_applied = pmpo_policy_loss(
-            log_prob,
-            advantages,
-            alpha,
-            min_balance_frac=pmpo_min_balance_frac,
-        )
-        apply_policy = train_policy and pmpo_applied
+        pi_loss = pmpo_policy_loss(log_prob, advantages, alpha)
         _, mean_u_bc, log_std_bc = policy_prior(h_pi)
         kl = heads.policy.gaussian_kl(
             mean_u[:, :, slot],
@@ -598,16 +576,10 @@ def imagination_rl_policy_loss(
     pi_loss_f = float(pi_loss.detach())
     kl_loss_f = float(kl_loss.detach())
     metrics: dict[str, float] = {
-        "pi_loss": pi_loss_f if apply_policy else 0.0,
-        "pi_kl_loss": kl_loss_f if apply_policy else 0.0,
+        "pi_loss": pi_loss_f if train_policy else 0.0,
+        "pi_kl_loss": kl_loss_f if train_policy else 0.0,
     }
-    # Always emit raw policy metrics when training policy so DDP sync_dist logging
-    # sees the same keys on every rank (conditional keys caused post-warmup hangs).
-    if train_policy:
-        metrics["pi_loss_raw"] = pi_loss_f
-        metrics["pi_kl_loss_raw"] = kl_loss_f
-    metrics["pi_pmpo_applied"] = float(apply_policy)
-    return pi_loss, kl_loss, apply_policy, metrics
+    return pi_loss, kl_loss, metrics
 
 
 def imagination_rl_loss(
@@ -622,7 +594,6 @@ def imagination_rl_loss(
     beta: float,
     alpha: float = 0.5,
     normalize_advantages: bool = False,
-    pmpo_min_balance_frac: float = 0.1,
     train_policy: bool = True,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
@@ -644,7 +615,7 @@ def imagination_rl_loss(
         lambda_=lambda_,
         normalize_advantages=normalize_advantages,
     )
-    pi_loss, kl_loss, apply_policy, policy_metrics = imagination_rl_policy_loss(
+    pi_loss, kl_loss, policy_metrics = imagination_rl_policy_loss(
         h_pi,
         imagined_actions,
         advantages,
@@ -652,11 +623,9 @@ def imagination_rl_loss(
         policy_prior,
         beta=beta,
         alpha=alpha,
-        pmpo_min_balance_frac=pmpo_min_balance_frac,
         train_policy=train_policy,
     )
     metrics.update(policy_metrics)
 
-    policy_weight = 1.0 if apply_policy else 0.0
-    total = val_loss + policy_weight * (pi_loss + kl_loss)
+    total = val_loss + (pi_loss + kl_loss if train_policy else 0.0)
     return total, metrics

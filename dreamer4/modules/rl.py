@@ -45,7 +45,6 @@ class RLModule(BaseModule):
         self.beta = float(imag.beta)
         self.normalize_advantages = bool(imag.get("normalize_advantages", False))
         self.policy_warmup_steps = int(imag.get("policy_warmup_steps", 200))
-        self.pmpo_min_balance_frac = float(imag.get("pmpo_min_balance_frac", 0.1))
         self._policy_lr = float(imag.get("policy_lr", cfg.train.optimizer.lr))
 
         self.tokenizer = build_tokenizer(cfg.model.tokenizer)
@@ -217,7 +216,6 @@ class RLModule(BaseModule):
             beta=self.beta,
             alpha=self.alpha,
             normalize_advantages=self.normalize_advantages,
-            pmpo_min_balance_frac=self.pmpo_min_balance_frac,
             train_policy=train_policy,
         )
 

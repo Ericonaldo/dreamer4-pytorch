@@ -64,7 +64,6 @@ imagination:
   beta: 0.3
   policy_warmup_steps: 500
   policy_lr: 3.0e-5
-  pmpo_min_balance_frac: 0.1
 
 train:
   batch_size: 64

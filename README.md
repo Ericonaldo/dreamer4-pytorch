@@ -163,7 +163,6 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [x] `RLModule` — imagination RL on top of BC (`modules/rl.py`); value head with TD(λ) return targets
 - [x] Config `configs/walker_walk/policy_imagination_pmpo.yaml`
 - [x] RL post-training stability: `init_value_head_from_reward_head`, policy warmup (value-only), `context_len_min`, `32-true` precision, PMPO log-prob recompute on fixed actions (see `analysis/imagination_rl.md`)
-- [x] Ablation config `policy_imagination_pmpo_nobalance.yaml` (`pmpo_min_balance_frac: 0`)
 
 ### Data & infra
 
@@ -238,12 +237,9 @@ We previously supported an optional PPO path but removed it: clipped PPO in late
 | Bounded imagination context | `imagination.context_len_min: 8` (+ `data.seq_len: 16`) | Rollout context suffix sampled in `[context_len_min, seq_len]` (not from length 1); set `context_len_min == seq_len` for fixed context |
 | Full fp32 RL training | `train.precision: 32-true` | BC/dynamics use `bf16-mixed`; PMPO `exp` / `atanh` / `Normal` / KL are numerically sensitive in mixed precision |
 
-Optional ablation: `policy_imagination_pmpo_nobalance.yaml` sets `pmpo_min_balance_frac: 0` (jax-like; no advantage sign-balance skip).
-
 | Config | Default warmup | Notes |
 |--------|----------------|-------|
-| `policy_imagination_pmpo.yaml` | 500 steps | `policy_lr: 3e-5`; `pmpo_min_balance_frac: 0.1` (**repo extension** — skips policy step when advantage signs are imbalanced) |
-| `policy_imagination_pmpo_nobalance.yaml` | 500 steps | Same as above with `pmpo_min_balance_frac: 0` |
+| `policy_imagination_pmpo.yaml` | 500 steps | `policy_lr: 3e-5` |
 
 ```bash
 # PMPO (Dreamer4 paper default)
