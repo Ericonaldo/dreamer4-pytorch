@@ -171,7 +171,8 @@ class SquashedGaussianHead(nn.Module):
     def forward(self, h_t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns squashed mean action, Gaussian mean u, log_std (B, T, L, A)."""
         B, T, _ = h_t.shape
-        raw = self.net(h_t).view(B, T, self.action_horizon, self.action_dim, 2)
+        # Linear may run in bf16 under mixed precision; distribution math stays fp32.
+        raw = self.net(h_t).view(B, T, self.action_horizon, self.action_dim, 2).float()
         mean_u = raw[..., 0]
         log_std = raw[..., 1].clamp(self.log_std_min, self.log_std_max)
         action = torch.tanh(mean_u)
@@ -184,7 +185,9 @@ class SquashedGaussianHead(nn.Module):
         actions: torch.Tensor,
     ) -> torch.Tensor:
         """Log prob of expert actions under squashed Gaussian; sum over action dims -> (...,)."""
-        actions = actions.clamp(-1.0 + self.eps, 1.0 - self.eps)
+        mean_u = mean_u.float()
+        log_std = log_std.float()
+        actions = actions.float().clamp(-1.0 + self.eps, 1.0 - self.eps)
         pre_tanh = torch.atanh(actions)
         std = log_std.exp()
         normal = Normal(mean_u, std)
@@ -211,6 +214,10 @@ class SquashedGaussianHead(nn.Module):
         log_std_prior: torch.Tensor,
     ) -> torch.Tensor:
         """KL between diagonal Gaussians in pre-tanh space; sum over action dims."""
+        mean_u = mean_u.float()
+        log_std = log_std.float()
+        mean_u_prior = mean_u_prior.float()
+        log_std_prior = log_std_prior.float()
         var = (log_std.exp()) ** 2
         var_prior = (log_std_prior.exp()) ** 2
         return 0.5 * (
@@ -470,6 +477,15 @@ def td_lambda_returns(
     return returns
 
 
+def _pmpo_advantage_balance_ok(flat_adv: torch.Tensor, min_balance_frac: float) -> bool:
+    n = flat_adv.numel()
+    if n == 0:
+        return False
+    n_pos = int((flat_adv >= 0).sum().item())
+    n_neg = n - n_pos
+    return n_pos >= min_balance_frac * n and n_neg >= min_balance_frac * n
+
+
 def pmpo_policy_loss(
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
@@ -479,27 +495,43 @@ def pmpo_policy_loss(
 ) -> tuple[torch.Tensor, bool]:
     """PMPO: sign-only advantages; alpha balances positive vs negative action sets.
 
-    Returns (loss, applied). Skips the policy term when either advantage sign
-    is too rare (PMPO needs both D+ and D-; all-positive A destroys BC policy).
+    Returns (loss, applied). Always computes loss for the autograd graph; caller
+    multiplies by weight 0 when applied is False (imbalanced advantage signs).
 
     Ref: https://github.com/edwhu/dreamer4-jax
     """
     flat_lp = log_prob.reshape(-1)
     flat_adv = advantages.reshape(-1)
-    n = flat_adv.numel()
-    if n == 0:
-        return log_prob.new_zeros(()), False
-
     mask_pos = flat_adv >= 0
     mask_neg = flat_adv < 0
     n_pos = int(mask_pos.sum().item())
     n_neg = int(mask_neg.sum().item())
-    if n_pos < min_balance_frac * n or n_neg < min_balance_frac * n:
-        return log_prob.new_zeros(()), False
+    # Safe denominators: empty mask → sum is 0, loss term is 0.
+    loss_neg = (1.0 - alpha) * (flat_lp * mask_neg).sum() / max(n_neg, 1)
+    loss_pos = -alpha * (flat_lp * mask_pos).sum() / max(n_pos, 1)
+    applied = _pmpo_advantage_balance_ok(flat_adv, min_balance_frac)
+    return loss_neg + loss_pos, applied
 
-    loss_neg = (1.0 - alpha) * (flat_lp * mask_neg).sum() / n_neg
-    loss_pos = -alpha * (flat_lp * mask_pos).sum() / n_pos
-    return loss_neg + loss_pos, True
+
+def _ppo_log_ratio_stats(
+    log_prob: torch.Tensor,
+    old_log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+) -> dict[str, float]:
+    with torch.no_grad():
+        log_ratio = log_prob - old_log_prob
+        ratio = log_ratio.exp()
+        return {
+            "pi_log_ratio_min": float(log_ratio.min()),
+            "pi_log_ratio_max": float(log_ratio.max()),
+            "pi_log_ratio_mean": float(log_ratio.mean()),
+            "pi_ratio_max": float(ratio.max()),
+            "pi_ratio_p99": float(ratio.quantile(0.99)),
+            "pi_adv_min": float(advantages.min()),
+            "pi_adv_max": float(advantages.max()),
+            "pi_adv_mean": float(advantages.mean()),
+            "pi_adv_std": float(advantages.std()),
+        }
 
 
 def ppo_policy_loss(
@@ -507,15 +539,168 @@ def ppo_policy_loss(
     old_log_prob: torch.Tensor,
     advantages: torch.Tensor,
     clip_eps: float,
+    *,
+    log_ratio_clip: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Clipped PPO surrogate on imagined actions; returns loss and clip fraction."""
-    ratio = torch.exp(log_prob - old_log_prob)
+    """Clipped PPO surrogate (Schulman et al.): maximize min(r·A, clip(r)·A)."""
+    log_ratio = log_prob - old_log_prob
+    if log_ratio_clip is not None:
+        log_ratio = torch.clamp(log_ratio, -log_ratio_clip, log_ratio_clip)
+    ratio = torch.exp(log_ratio)
     surr1 = ratio * advantages
     surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantages
     loss = -torch.min(surr1, surr2).mean()
     with torch.no_grad():
         clipfrac = ((ratio - 1.0).abs() > clip_eps).float().mean()
     return loss, clipfrac
+
+
+def imagination_rl_value_loss(
+    hidden: torch.Tensor,
+    imagined_actions: torch.Tensor,
+    heads: AgentHeads,
+    value_head: SymExpTwoHotHead,
+    *,
+    gamma: float,
+    lambda_: float,
+    normalize_advantages: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+    """Value CE on TD-λ targets; returns (val_loss, advantages, value metrics)."""
+    h = hidden.detach()
+    H = imagined_actions.shape[1]
+
+    reward_logits = heads.reward_head(h[:, 1:])
+    reward_slot0 = reward_logits[:, :, 0]
+    rewards = heads.reward_head.decode(reward_slot0)
+
+    val_logits = value_head(h)
+    values = value_head.decode(val_logits)
+
+    td_returns = td_lambda_returns(rewards, values, gamma, lambda_)
+    val_loss = value_head.loss(val_logits[:, :-1], td_returns).mean()
+
+    advantages = (td_returns - values[:, :-1]).detach().float()
+    if normalize_advantages:
+        adv_std = advantages.std().clamp_min(1e-8)
+        advantages = (advantages - advantages.mean()) / adv_std
+
+    metrics = {
+        "val_loss": float(val_loss.detach()),
+        "mean_advantage": float(advantages.mean().detach()),
+        "mean_td_return": float(td_returns.mean().detach()),
+        "mean_reward_pred": float(rewards.mean().detach()),
+        "mean_value": float(values.mean().detach()),
+    }
+    return val_loss, advantages, metrics
+
+
+def snapshot_ppo_old_log_prob(
+    h_pi: torch.Tensor,
+    imagined_actions: torch.Tensor,
+    heads: AgentHeads,
+) -> torch.Tensor:
+    """Behavior-policy log_prob for PPO multi-epoch (frozen before policy updates)."""
+    slot = POLICY_ENV_ACTION_SLOT
+    with torch.no_grad():
+        _, mean_u, log_std = heads.policy(h_pi)
+        return heads.policy.log_prob(
+            mean_u[:, :, slot],
+            log_std[:, :, slot],
+            imagined_actions.float(),
+        )
+
+
+def imagination_rl_policy_loss(
+    h_pi: torch.Tensor,
+    imagined_actions: torch.Tensor,
+    imagined_log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    heads: AgentHeads,
+    policy_prior: SquashedGaussianHead,
+    *,
+    beta: float,
+    policy_loss: str = "pmpo",
+    alpha: float = 0.5,
+    ppo_clip: float = 0.2,
+    ppo_log_ratio_clip: float | None = None,
+    pmpo_min_balance_frac: float = 0.1,
+    train_policy: bool = True,
+    ppo_old_log_prob: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, bool, dict[str, float]]:
+    """Policy + KL loss on imagined trajectories; returns (pi_loss, kl_loss, apply_policy, metrics)."""
+    slot = POLICY_ENV_ACTION_SLOT
+    imagined_actions_f = imagined_actions.float()
+    imagined_log_prob_f = imagined_log_prob.detach().float()
+
+    pi_clipfrac = None
+    ppo_stats: dict[str, float] | None = None
+
+    policy_ctx = torch.enable_grad() if train_policy else torch.no_grad()
+    with policy_ctx:
+        _, mean_u, log_std = heads.policy(h_pi)
+        if not torch.isfinite(mean_u).all():
+            raise RuntimeError("non-finite policy mean_u in imagination_rl_loss")
+
+        if policy_loss == "pmpo":
+            pi_loss, pmpo_applied = pmpo_policy_loss(
+                imagined_log_prob_f,
+                advantages,
+                alpha,
+                min_balance_frac=pmpo_min_balance_frac,
+            )
+            apply_policy = train_policy and pmpo_applied
+        elif policy_loss == "ppo":
+            new_log_prob = heads.policy.log_prob(
+                mean_u[:, :, slot],
+                log_std[:, :, slot],
+                imagined_actions_f,
+            )
+            if ppo_old_log_prob is None:
+                old_log_prob = new_log_prob.detach()
+            else:
+                old_log_prob = ppo_old_log_prob
+            with torch.no_grad():
+                rollout_old = imagined_log_prob_f
+                pi_rollout_old_diff = float((rollout_old - old_log_prob).abs().max())
+            pi_loss, pi_clipfrac = ppo_policy_loss(
+                new_log_prob,
+                old_log_prob,
+                advantages,
+                ppo_clip,
+                log_ratio_clip=ppo_log_ratio_clip,
+            )
+            apply_policy = train_policy
+            ppo_stats = _ppo_log_ratio_stats(new_log_prob, rollout_old, advantages)
+            ppo_stats["pi_rollout_old_diff"] = pi_rollout_old_diff
+        else:
+            raise ValueError(f"Unknown policy_loss: {policy_loss!r} (expected 'pmpo' or 'ppo')")
+        _, mean_u_bc, log_std_bc = policy_prior(h_pi)
+        kl = heads.policy.gaussian_kl(
+            mean_u[:, :, slot],
+            log_std[:, :, slot],
+            mean_u_bc[:, :, slot],
+            log_std_bc[:, :, slot],
+        ).mean()
+        kl_loss = beta * kl
+
+    pi_loss_f = float(pi_loss.detach())
+    kl_loss_f = float(kl_loss.detach())
+    metrics: dict[str, float] = {
+        "pi_loss": pi_loss_f if apply_policy else 0.0,
+        "pi_kl_loss": kl_loss_f if apply_policy else 0.0,
+    }
+    # Always emit raw policy metrics when training policy so DDP sync_dist logging
+    # sees the same keys on every rank (conditional keys caused post-warmup hangs).
+    if train_policy:
+        metrics["pi_loss_raw"] = pi_loss_f
+        metrics["pi_kl_loss_raw"] = kl_loss_f
+    if policy_loss == "pmpo":
+        metrics["pi_pmpo_applied"] = float(apply_policy)
+    if pi_clipfrac is not None:
+        metrics["pi_clipfrac"] = float(pi_clipfrac)
+    if ppo_stats is not None:
+        metrics.update(ppo_stats)
+    return pi_loss, kl_loss, apply_policy, metrics
 
 
 def imagination_rl_loss(
@@ -532,9 +717,11 @@ def imagination_rl_loss(
     policy_loss: str = "pmpo",
     alpha: float = 0.5,
     ppo_clip: float = 0.2,
+    ppo_log_ratio_clip: float | None = None,
     normalize_advantages: bool = False,
     pmpo_min_balance_frac: float = 0.1,
     train_policy: bool = True,
+    ppo_old_log_prob: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
     Value CE on TD-λ targets + policy loss (PMPO or PPO) + KL(π || π_BC) on imagined trajectories.
@@ -545,77 +732,35 @@ def imagination_rl_loss(
     """
     h = hidden.detach()
     H = imagined_actions.shape[1]
-
-    reward_logits = heads.reward_head(h[:, 1:])
-    reward_slot0 = reward_logits[:, :, 0]
-    rewards = heads.reward_head.decode(reward_slot0)
-
-    val_logits = value_head(h)
-    values = value_head.decode(val_logits)
-
-    td_returns = td_lambda_returns(rewards, values, gamma, lambda_)
-    val_loss = value_head.loss(val_logits[:, :-1], td_returns).mean()
-
-    advantages = (td_returns - values[:, :-1]).detach()
-    if normalize_advantages:
-        adv_std = advantages.std().clamp_min(1e-8)
-        advantages = (advantages - advantages.mean()) / adv_std
-
     h_pi = h[:, :H]
-    slot = POLICY_ENV_ACTION_SLOT
 
-    policy_ctx = torch.enable_grad() if train_policy else torch.no_grad()
-    with policy_ctx:
-        _, mean_u, log_std = heads.policy(h_pi)
+    val_loss, advantages, metrics = imagination_rl_value_loss(
+        hidden,
+        imagined_actions,
+        heads,
+        value_head,
+        gamma=gamma,
+        lambda_=lambda_,
+        normalize_advantages=normalize_advantages,
+    )
+    pi_loss, kl_loss, apply_policy, policy_metrics = imagination_rl_policy_loss(
+        h_pi,
+        imagined_actions,
+        imagined_log_prob,
+        advantages,
+        heads,
+        policy_prior,
+        beta=beta,
+        policy_loss=policy_loss,
+        alpha=alpha,
+        ppo_clip=ppo_clip,
+        ppo_log_ratio_clip=ppo_log_ratio_clip,
+        pmpo_min_balance_frac=pmpo_min_balance_frac,
+        train_policy=train_policy,
+        ppo_old_log_prob=ppo_old_log_prob,
+    )
+    metrics.update(policy_metrics)
 
-        if policy_loss == "pmpo":
-            pi_loss, pmpo_applied = pmpo_policy_loss(
-                imagined_log_prob,
-                advantages,
-                alpha,
-                min_balance_frac=pmpo_min_balance_frac,
-            )
-            pi_clipfrac = None
-            apply_policy = train_policy and pmpo_applied
-        elif policy_loss == "ppo":
-            new_log_prob = heads.policy.log_prob(
-                mean_u[:, :, slot],
-                log_std[:, :, slot],
-                imagined_actions,
-            )
-            pi_loss, pi_clipfrac = ppo_policy_loss(
-                new_log_prob,
-                imagined_log_prob.detach(),
-                advantages,
-                ppo_clip,
-            )
-            apply_policy = train_policy
-        else:
-            raise ValueError(f"Unknown policy_loss: {policy_loss!r} (expected 'pmpo' or 'ppo')")
-        _, mean_u_bc, log_std_bc = policy_prior(h_pi)
-        kl = heads.policy.gaussian_kl(
-            mean_u[:, :, slot],
-            log_std[:, :, slot],
-            mean_u_bc[:, :, slot],
-            log_std_bc[:, :, slot],
-        ).mean()
-        kl_loss = beta * kl
-
-    total = val_loss + (pi_loss + kl_loss if apply_policy else 0.0)
-    metrics: dict[str, float] = {
-        "val_loss": float(val_loss.detach()),
-        "pi_loss": float(pi_loss.detach()) if apply_policy else 0.0,
-        "pi_kl_loss": float(kl_loss.detach()) if apply_policy else 0.0,
-        "mean_advantage": float(advantages.mean().detach()),
-        "mean_td_return": float(td_returns.mean().detach()),
-        "mean_reward_pred": float(rewards.mean().detach()),
-        "mean_value": float(values.mean().detach()),
-    }
-    if not apply_policy and train_policy:
-        metrics["pi_loss_raw"] = float(pi_loss.detach())
-        metrics["pi_kl_loss_raw"] = float(kl_loss.detach())
-    if policy_loss == "pmpo":
-        metrics["pi_pmpo_applied"] = float(apply_policy)
-    if pi_clipfrac is not None:
-        metrics["pi_clipfrac"] = float(pi_clipfrac)
+    policy_weight = 1.0 if apply_policy else 0.0
+    total = val_loss + policy_weight * (pi_loss + kl_loss)
     return total, metrics

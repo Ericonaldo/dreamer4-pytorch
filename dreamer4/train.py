@@ -6,6 +6,7 @@ import lightning as L
 import torch
 from lightning.pytorch.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
+from lightning.pytorch.utilities import rank_zero_warn
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
@@ -24,6 +25,9 @@ class ValidateEveryNSteps(Callback):
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
         step = trainer.global_step
+        warmup = int(getattr(pl_module, "policy_warmup_steps", 0))
+        if warmup > 0 and step == warmup:
+            return
         if step > 0 and step % self.every_n_steps == 0:
             trainer.strategy.barrier()
             pl_module.eval()
@@ -39,6 +43,39 @@ class ValidateEveryNSteps(Callback):
             pl_module._val_n_batches = None
             pl_module.train()
             trainer.strategy.barrier()
+
+
+class SaveCheckpointAfterPolicyWarmup(Callback):
+    """RL: save ``warmup_end.ckpt`` when value-only warmup finishes (for easy resume)."""
+
+    def __init__(self, checkpoint_dir: Path, warmup_steps: int):
+        self.checkpoint_dir = checkpoint_dir
+        self.warmup_steps = int(warmup_steps)
+        self._saved = False
+
+    def on_fit_start(self, trainer, pl_module) -> None:
+        if int(trainer.global_step) >= self.warmup_steps:
+            self._saved = True
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
+        if self.warmup_steps <= 0 or self._saved:
+            return
+        step = int(trainer.global_step)
+        if step != self.warmup_steps:
+            return
+        self._saved = True
+        trainer.strategy.barrier()
+        if trainer.is_global_zero:
+            rank_zero_warn(f"Saving post-warmup checkpoint at step {step}...")
+            path = self.checkpoint_dir / "warmup_end.ckpt"
+            trainer.save_checkpoint(str(path))
+            rank_zero_warn(
+                f"Saved post-warmup checkpoint at step {step}: {path} "
+                f"(resume with train.resume_ckpt={path})"
+            )
+        trainer.strategy.barrier()
+        if trainer.is_global_zero:
+            rank_zero_warn(f"Post-warmup checkpoint barrier done at step {step}; continuing training")
 
 
 class KeepLastCheckpoints(Callback):
@@ -190,13 +227,25 @@ def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool, val_loader: Dat
             ValidateEveryNSteps(val_every, int(cfg.train.get("val_max_batches", 32)), val_loader)
         )
 
+    if cfg.stage == "rl":
+        warmup_steps = int(cfg.get("imagination", {}).get("policy_warmup_steps", 0))
+        if warmup_steps > 0:
+            callbacks.append(SaveCheckpointAfterPolicyWarmup(checkpoint_dir, warmup_steps))
+
+    grad_clip = cfg.train.get("grad_clip")
+    if cfg.stage == "rl":
+        imag = cfg.get("imagination", {})
+        if str(imag.get("policy_loss", "pmpo")) == "ppo" and int(imag.get("ppo_epochs", 1)) > 1:
+            # PPO multi-epoch uses manual optimization; clip in RLModule._clip_and_step.
+            grad_clip = None
+
     return L.Trainer(
         max_steps=cfg.train.max_steps,
         accelerator=cfg.train.accelerator,
         devices=devices,
         strategy=strategy,
         precision=cfg.train.precision,
-        gradient_clip_val=cfg.train.get("grad_clip"),
+        gradient_clip_val=grad_clip,
         log_every_n_steps=cfg.log.every_n_steps,
         check_val_every_n_epoch=0 if step_val else 1,
         limit_val_batches=limit_val_batches,

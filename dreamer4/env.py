@@ -12,12 +12,10 @@ import functools
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import elements
 import numpy as np
-from dm_control import manipulation
-from dm_control import suite
-from dm_control.locomotion.examples import basic_rodent_2020
 
 # Vendored embodied (ref/embodied) when the package is not installed.
 _REPO_EMBODIED = Path(__file__).resolve().parents[1] / "ref" / "embodied"
@@ -53,6 +51,22 @@ ActionRepeat = _load_embodied("embodied.core.wrappers", "embodied/core/wrappers.
 FromDM = _load_embodied("embodied.envs.from_dm", "embodied/envs/from_dm.py").FromDM
 Env = sys.modules["embodied.core.base"].Env
 
+_dm_control_modules: tuple[Any, Any, Any] | None = None
+
+
+def ensure_dm_control_loaded() -> None:
+    """Import dm_control after MUJOCO_GL is set (required for headless EGL)."""
+    global _dm_control_modules
+    if _dm_control_modules is not None:
+        return
+    if "MUJOCO_GL" not in os.environ:
+        os.environ["MUJOCO_GL"] = "egl"
+    from dm_control import manipulation
+    from dm_control import suite
+    from dm_control.locomotion.examples import basic_rodent_2020
+
+    _dm_control_modules = (manipulation, suite, basic_rodent_2020)
+
 
 class DMC(Env):
     DEFAULT_CAMERAS = dict(
@@ -71,6 +85,8 @@ class DMC(Env):
     ):
         if "MUJOCO_GL" not in os.environ:
             os.environ["MUJOCO_GL"] = "egl"
+        ensure_dm_control_loaded()
+        manipulation, suite, basic_rodent_2020 = _dm_control_modules
         if isinstance(env, str):
             domain, task = env.split("_", 1)
             if camera == -1:

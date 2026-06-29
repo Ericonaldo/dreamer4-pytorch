@@ -11,7 +11,15 @@ from dreamer4.data import align_dynamics_batch
 from dreamer4.imagination import imagine_latent_rollout
 from dreamer4.modules.base import BaseModule
 from dreamer4.modules.bc import _load_state
-from dreamer4.models.policy import imagination_rl_loss, init_value_head_from_reward_head, SymExpTwoHotEncoder, SymExpTwoHotHead
+from dreamer4.models.policy import (
+    imagination_rl_loss,
+    imagination_rl_policy_loss,
+    imagination_rl_value_loss,
+    init_value_head_from_reward_head,
+    snapshot_ppo_old_log_prob,
+    SymExpTwoHotEncoder,
+    SymExpTwoHotHead,
+)
 from dreamer4.policy_agent import AsyncBCEval
 
 
@@ -31,6 +39,7 @@ class RLModule(BaseModule):
 
         imag = cfg.imagination
         self.seq_len = int(cfg.data.seq_len)
+        self.context_len_min = int(imag.get("context_len_min", 8))
         self.horizon = int(imag.horizon)
         self.flow_steps = int(imag.flow_steps)
         self.gamma = float(imag.gamma)
@@ -39,6 +48,11 @@ class RLModule(BaseModule):
         self.beta = float(imag.beta)
         self.policy_loss = str(imag.get("policy_loss", "pmpo"))
         self.ppo_clip = float(imag.get("ppo_clip", 0.2))
+        self.ppo_epochs = int(imag.get("ppo_epochs", 1))
+        self.ppo_log_ratio_clip = imag.get("ppo_log_ratio_clip")
+        self.ppo_log_ratio_clip = (
+            float(self.ppo_log_ratio_clip) if self.ppo_log_ratio_clip is not None else None
+        )
         self.normalize_advantages = bool(imag.get("normalize_advantages", self.policy_loss == "ppo"))
         self.policy_warmup_steps = int(imag.get("policy_warmup_steps", 200))
         self.pmpo_min_balance_frac = float(imag.get("pmpo_min_balance_frac", 0.1))
@@ -90,9 +104,10 @@ class RLModule(BaseModule):
 
         self.bc_space_mode = self.model.bc_space_mode
         self._env_eval = AsyncBCEval()
-        if self.policy_warmup_steps > 0:
-            for p in self.model.heads.policy.parameters():
-                p.requires_grad_(False)
+
+    @property
+    def automatic_optimization(self) -> bool:
+        return not (self.policy_loss == "ppo" and self.ppo_epochs > 1)
 
     def configure_optimizers(self):
         opt_cfg = self.cfg.train.optimizer
@@ -128,34 +143,49 @@ class RLModule(BaseModule):
         image: torch.Tensor,
         action: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        """Random suffix context ending at the window tail; length uniform in [1, min(seq_len, T)]."""
+        """Random suffix context ending at the window tail; length uniform in [min_ctx, max_ctx]."""
         T = image.shape[1]
         max_ctx = min(self.seq_len, T)
         if max_ctx < 1:
             raise ValueError(f"need at least 1 context frame, got T={T}, max_ctx={max_ctx}")
-        ctx_len = int(torch.randint(1, max_ctx + 1, (1,)).item())
+        min_ctx = min(self.context_len_min, max_ctx)
+        if min_ctx >= max_ctx:
+            ctx_len = max_ctx
+        else:
+            ctx_len = int(torch.randint(min_ctx, max_ctx + 1, (1,)).item())
         start = T - ctx_len
         return image[:, start:], action[:, start:], ctx_len
 
-    def on_train_batch_start(self, batch, batch_idx) -> None:
+    def _restore_policy_lr_after_warmup(self) -> None:
         if self.policy_warmup_steps <= 0:
             return
-        step = int(self.trainer.global_step)
-        policy_train = step >= self.policy_warmup_steps
-        for p in self.model.heads.policy.parameters():
-            p.requires_grad_(policy_train)
-        if step != self.policy_warmup_steps:
+        if self.trainer is None:
             return
-        opt = self.trainer.optimizers[0]
+        if int(self.trainer.global_step) < self.policy_warmup_steps:
+            return
+        optimizers = self.trainer.optimizers
+        if not optimizers:
+            return
+        opt = optimizers[0] if isinstance(optimizers, (list, tuple)) else optimizers
         for pg in opt.param_groups:
-            if pg.get("name") == "policy":
+            if pg.get("name") == "policy" and pg["lr"] != self._policy_lr:
                 pg["lr"] = self._policy_lr
 
-    def _shared_step(self, batch, stage: str) -> torch.Tensor:
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        super().on_load_checkpoint(checkpoint)
+        self._restore_policy_lr_after_warmup()
+
+    def on_train_start(self) -> None:
+        super().on_train_start()
+        self._restore_policy_lr_after_warmup()
+
+    def on_train_batch_start(self, batch, batch_idx) -> None:
+        self._restore_policy_lr_after_warmup()
+
+    def _imagine_from_batch(self, batch):
         if batch.image is None:
             raise ValueError("RL training requires images; set data.obs_mode=image or both")
 
-        prefix = "val" if stage == "val" else self.stage
         image, action, _ = align_dynamics_batch(batch.image, batch.action, batch.reward)
         if image.shape[1] < 2:
             raise ValueError(
@@ -179,12 +209,94 @@ class RLModule(BaseModule):
             bc_space_mode=self.bc_space_mode,
             ctx_len=ctx_len,
         )
+        return rollout
+
+    def _log_rl_metrics(self, metrics: dict[str, float], *, stage: str = "train") -> None:
+        prefix = "val" if stage == "val" else self.stage
+        for key, value in metrics.items():
+            prog = stage == "train" and key in ("val_loss", "pi_loss", "mean_td_return")
+            self.log(f"{prefix}/{key}", value, prog_bar=prog, sync_dist=stage == "train")
+
+    def _clip_and_step(self, opt) -> None:
+        grad_clip = self.cfg.train.get("grad_clip")
+        if grad_clip is not None and grad_clip > 0:
+            self.clip_gradients(opt, gradient_clip_val=grad_clip)
+        opt.step()
+
+    def training_step(self, batch, batch_idx):
+        if self.automatic_optimization:
+            loss = self._shared_step(batch, "train")
+            self.log(f"{self.stage}/loss", loss, prog_bar=True, sync_dist=True)
+            return loss
+        return self._training_step_ppo_multi_epoch(batch)
+
+    def _training_step_ppo_multi_epoch(self, batch, batch_idx=0):
+        self._restore_policy_lr_after_warmup()
+        opt = self.optimizers()
+        rollout = self._imagine_from_batch(batch)
+        train_policy = int(self.trainer.global_step) >= self.policy_warmup_steps
+
+        h = rollout.hidden.detach()
+        h_pi = h[:, : rollout.actions.shape[1]]
+
+        val_loss, advantages, metrics = imagination_rl_value_loss(
+            rollout.hidden,
+            rollout.actions,
+            self.model.heads,
+            self.value_head,
+            gamma=self.gamma,
+            lambda_=self.lambda_,
+            normalize_advantages=self.normalize_advantages,
+        )
+
+        if not train_policy:
+            opt.zero_grad()
+            self.manual_backward(val_loss)
+            self._clip_and_step(opt)
+            self._log_rl_metrics(metrics)
+            self.log(f"{self.stage}/loss", val_loss, prog_bar=True, sync_dist=True)
+            return val_loss
+
+        old_log_prob = snapshot_ppo_old_log_prob(
+            h_pi, rollout.actions, self.model.heads
+        )
+        last_loss = val_loss
+        for epoch in range(self.ppo_epochs):
+            opt.zero_grad(set_to_none=True)
+            pi_loss, kl_loss, _, policy_metrics = imagination_rl_policy_loss(
+                h_pi,
+                rollout.actions,
+                rollout.log_prob,
+                advantages,
+                self.model.heads,
+                self.policy_prior,
+                beta=self.beta,
+                policy_loss="ppo",
+                ppo_clip=self.ppo_clip,
+                ppo_log_ratio_clip=self.ppo_log_ratio_clip,
+                train_policy=True,
+                ppo_old_log_prob=old_log_prob,
+            )
+            loss = val_loss + pi_loss + kl_loss if epoch == 0 else pi_loss + kl_loss
+            self.manual_backward(loss)
+            self._clip_and_step(opt)
+            last_loss = loss.detach()
+            metrics = {**metrics, **policy_metrics}
+
+        metrics["ppo_epochs"] = float(self.ppo_epochs)
+        self._log_rl_metrics(metrics)
+        self.log(f"{self.stage}/loss", last_loss, prog_bar=True, sync_dist=True)
+        return last_loss
+
+    def _shared_step(self, batch, stage: str) -> torch.Tensor:
+        rollout = self._imagine_from_batch(batch)
 
         train_policy = (
             stage == "train"
             and int(self.trainer.global_step) >= self.policy_warmup_steps
         )
 
+        prefix = "val" if stage == "val" else self.stage
         loss, metrics = imagination_rl_loss(
             rollout.hidden,
             rollout.actions,
@@ -198,6 +310,7 @@ class RLModule(BaseModule):
             policy_loss=self.policy_loss,
             alpha=self.alpha,
             ppo_clip=self.ppo_clip,
+            ppo_log_ratio_clip=self.ppo_log_ratio_clip,
             normalize_advantages=self.normalize_advantages,
             pmpo_min_balance_frac=self.pmpo_min_balance_frac,
             train_policy=train_policy,
@@ -225,6 +338,9 @@ class RLModule(BaseModule):
     def on_validation_epoch_end(self) -> None:
         if not self.trainer.is_global_zero:
             return
+        step = int(self.trainer.global_step)
+        if self.policy_warmup_steps > 0 and step == self.policy_warmup_steps:
+            return
 
         eval_cfg = self.cfg.get("eval", {})
         if not eval_cfg.get("env_eval", True):
@@ -235,6 +351,5 @@ class RLModule(BaseModule):
             rank_zero_warn(f"Skipping RL env eval (install dreamer4[dmc]): {exc}")
             return
 
-        step = int(self.trainer.global_step)
         run_dir = Path(self.cfg.log.dir) / self.cfg.log.run_name
         self._env_eval.start(step, self.cfg, self.model, self.tokenizer, run_dir)

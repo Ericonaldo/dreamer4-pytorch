@@ -370,8 +370,6 @@ def _worker(
     out_queue,
 ) -> None:
     os.environ.setdefault("MUJOCO_GL", "egl")
-    if gpu_id is not None:
-        os.environ["MUJOCO_EGL_DEVICE_ID"] = str(gpu_id)
     cfg = OmegaConf.create(cfg_dict)
     if gpu_id is not None and torch.cuda.is_available():
         torch.cuda.set_device(gpu_id)
@@ -482,8 +480,6 @@ def run_bc_policy_video(
 ) -> dict[str, Any]:
     """Record one online env episode as mp4 (BC policy)."""
     os.environ.setdefault("MUJOCO_GL", "egl")
-    if gpu_id is not None and torch.cuda.is_available():
-        os.environ["MUJOCO_EGL_DEVICE_ID"] = str(gpu_id)
     env = _make_eval_env(cfg)
 
     if gpu_id is not None and torch.cuda.is_available():
@@ -591,7 +587,10 @@ class AsyncBCEval:
         tokenizer: nn.Module,
         run_dir: Path,
     ) -> None:
-        if self.pending:
+        if self.pending or self._queue is not None:
+            from lightning.pytorch.utilities import rank_zero_warn
+
+            rank_zero_warn(f"Skipping async env eval at step {step}: previous eval still active")
             return
         self._ctx = get_context("spawn")
         self._queue = self._ctx.Queue()

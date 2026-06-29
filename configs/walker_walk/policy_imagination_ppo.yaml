@@ -2,7 +2,7 @@ stage: rl
 
 data:
   path: data/dmc_walker_walk
-  seq_len: 16  # transition window; random context length in [1, seq_len], end at window tail
+  seq_len: 16  # transition window; fixed context when context_len_min == seq_len
   obs_mode: image
   num_workers: 8
   val_fraction: 0.05
@@ -57,29 +57,33 @@ model:
 imagination:
   horizon: 8
   flow_steps: 8
+  context_len_min: 16  # fixed ctx=16 when seq_len=16
+  ppo_epochs: 4
   gamma: 0.997
   lambda_: 0.95
   policy_loss: ppo
   ppo_clip: 0.2
+  ppo_log_ratio_clip: 20.0  # cap exp(log_ratio) ~ 4.85e8; prevents A<0,r>>1 blow-up in multi-epoch PPO
   beta: 0.3
-  policy_warmup_steps: 200
+  policy_warmup_steps: 500
+  policy_lr: 3.0e-5
 
 train:
   batch_size: 64
   max_steps: 10_000
   checkpoint_every: 1000
   checkpoint_keep_last: 5
-  val_every: 100
+  val_every: 500
   val_max_batches: 8
-  devices: 8
+  devices: 4
   accelerator: gpu
-  precision: bf16-mixed
+  precision: 32-true  # RL policy PPO/PMPO numerically sensitive; BC/dynamics use bf16-mixed
   grad_clip: 1.0
   optimizer:
-    lr: 3.0e-4
+    lr: 1.0e-4
     betas: [0.9, 0.95]
     weight_decay: 0.01
-    use_scheduler: true
+    use_scheduler: false
 
 log:
   dir: logs

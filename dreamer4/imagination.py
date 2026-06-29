@@ -45,6 +45,9 @@ def imagine_latent_rollout(
         a_sliding = actions_ctx
         ctx_len = ctx
 
+    z_sliding = z_sliding.float()
+    a_sliding = a_sliding.float()
+
     with torch.no_grad():
         h_seq = policy_model.agent_hidden(z_sliding, a_sliding, space_mode=bc_space_mode)
     h = h_seq[:, -1]
@@ -59,11 +62,10 @@ def imagine_latent_rollout(
         h_in = h.unsqueeze(1)
         # Sampling is not in the value-loss path; recompute log_prob in imagination_rl_loss for PPO.
         with torch.no_grad():
-            h_fp32 = h_in.float()
-            action_mtp, log_p_mtp, _, _ = policy.sample(h_fp32)
+            action_mtp, log_p_mtp, _, _ = policy.sample(h_in)
         slot = POLICY_ENV_ACTION_SLOT
-        action = action_mtp[:, 0, slot].to(h.dtype)
-        log_p = log_p_mtp[:, 0, slot].to(h.dtype)
+        action = action_mtp[:, 0, slot]
+        log_p = log_p_mtp[:, 0, slot]
         imagined_actions.append(action)
         imagined_log_prob.append(log_p)
 
