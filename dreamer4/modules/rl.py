@@ -13,10 +13,7 @@ from dreamer4.modules.base import BaseModule
 from dreamer4.modules.bc import _load_state
 from dreamer4.models.policy import (
     imagination_rl_loss,
-    imagination_rl_policy_loss,
-    imagination_rl_value_loss,
     init_value_head_from_reward_head,
-    snapshot_ppo_old_log_prob,
     SymExpTwoHotEncoder,
     SymExpTwoHotHead,
 )
@@ -46,14 +43,7 @@ class RLModule(BaseModule):
         self.lambda_ = float(imag.lambda_)
         self.alpha = float(imag.get("alpha", 0.5))
         self.beta = float(imag.beta)
-        self.policy_loss = str(imag.get("policy_loss", "pmpo"))
-        self.ppo_clip = float(imag.get("ppo_clip", 0.2))
-        self.ppo_epochs = int(imag.get("ppo_epochs", 1))
-        self.ppo_log_ratio_clip = imag.get("ppo_log_ratio_clip")
-        self.ppo_log_ratio_clip = (
-            float(self.ppo_log_ratio_clip) if self.ppo_log_ratio_clip is not None else None
-        )
-        self.normalize_advantages = bool(imag.get("normalize_advantages", self.policy_loss == "ppo"))
+        self.normalize_advantages = bool(imag.get("normalize_advantages", False))
         self.policy_warmup_steps = int(imag.get("policy_warmup_steps", 200))
         self.pmpo_min_balance_frac = float(imag.get("pmpo_min_balance_frac", 0.1))
         self._policy_lr = float(imag.get("policy_lr", cfg.train.optimizer.lr))
@@ -104,10 +94,6 @@ class RLModule(BaseModule):
 
         self.bc_space_mode = self.model.bc_space_mode
         self._env_eval = AsyncBCEval()
-
-    @property
-    def automatic_optimization(self) -> bool:
-        return not (self.policy_loss == "ppo" and self.ppo_epochs > 1)
 
     def configure_optimizers(self):
         opt_cfg = self.cfg.train.optimizer
@@ -211,83 +197,6 @@ class RLModule(BaseModule):
         )
         return rollout
 
-    def _log_rl_metrics(self, metrics: dict[str, float], *, stage: str = "train") -> None:
-        prefix = "val" if stage == "val" else self.stage
-        for key, value in metrics.items():
-            prog = stage == "train" and key in ("val_loss", "pi_loss", "mean_td_return")
-            self.log(f"{prefix}/{key}", value, prog_bar=prog, sync_dist=stage == "train")
-
-    def _clip_and_step(self, opt) -> None:
-        grad_clip = self.cfg.train.get("grad_clip")
-        if grad_clip is not None and grad_clip > 0:
-            self.clip_gradients(opt, gradient_clip_val=grad_clip)
-        opt.step()
-
-    def training_step(self, batch, batch_idx):
-        if self.automatic_optimization:
-            loss = self._shared_step(batch, "train")
-            self.log(f"{self.stage}/loss", loss, prog_bar=True, sync_dist=True)
-            return loss
-        return self._training_step_ppo_multi_epoch(batch)
-
-    def _training_step_ppo_multi_epoch(self, batch, batch_idx=0):
-        self._restore_policy_lr_after_warmup()
-        opt = self.optimizers()
-        rollout = self._imagine_from_batch(batch)
-        train_policy = int(self.trainer.global_step) >= self.policy_warmup_steps
-
-        h = rollout.hidden.detach()
-        h_pi = h[:, : rollout.actions.shape[1]]
-
-        val_loss, advantages, metrics = imagination_rl_value_loss(
-            rollout.hidden,
-            rollout.actions,
-            self.model.heads,
-            self.value_head,
-            gamma=self.gamma,
-            lambda_=self.lambda_,
-            normalize_advantages=self.normalize_advantages,
-        )
-
-        if not train_policy:
-            opt.zero_grad()
-            self.manual_backward(val_loss)
-            self._clip_and_step(opt)
-            self._log_rl_metrics(metrics)
-            self.log(f"{self.stage}/loss", val_loss, prog_bar=True, sync_dist=True)
-            return val_loss
-
-        old_log_prob = snapshot_ppo_old_log_prob(
-            h_pi, rollout.actions, self.model.heads
-        )
-        last_loss = val_loss
-        for epoch in range(self.ppo_epochs):
-            opt.zero_grad(set_to_none=True)
-            pi_loss, kl_loss, _, policy_metrics = imagination_rl_policy_loss(
-                h_pi,
-                rollout.actions,
-                rollout.log_prob,
-                advantages,
-                self.model.heads,
-                self.policy_prior,
-                beta=self.beta,
-                policy_loss="ppo",
-                ppo_clip=self.ppo_clip,
-                ppo_log_ratio_clip=self.ppo_log_ratio_clip,
-                train_policy=True,
-                ppo_old_log_prob=old_log_prob,
-            )
-            loss = val_loss + pi_loss + kl_loss if epoch == 0 else pi_loss + kl_loss
-            self.manual_backward(loss)
-            self._clip_and_step(opt)
-            last_loss = loss.detach()
-            metrics = {**metrics, **policy_metrics}
-
-        metrics["ppo_epochs"] = float(self.ppo_epochs)
-        self._log_rl_metrics(metrics)
-        self.log(f"{self.stage}/loss", last_loss, prog_bar=True, sync_dist=True)
-        return last_loss
-
     def _shared_step(self, batch, stage: str) -> torch.Tensor:
         rollout = self._imagine_from_batch(batch)
 
@@ -307,10 +216,7 @@ class RLModule(BaseModule):
             gamma=self.gamma,
             lambda_=self.lambda_,
             beta=self.beta,
-            policy_loss=self.policy_loss,
             alpha=self.alpha,
-            ppo_clip=self.ppo_clip,
-            ppo_log_ratio_clip=self.ppo_log_ratio_clip,
             normalize_advantages=self.normalize_advantages,
             pmpo_min_balance_frac=self.pmpo_min_balance_frac,
             train_policy=train_policy,

@@ -232,20 +232,13 @@ def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool, val_loader: Dat
         if warmup_steps > 0:
             callbacks.append(SaveCheckpointAfterPolicyWarmup(checkpoint_dir, warmup_steps))
 
-    grad_clip = cfg.train.get("grad_clip")
-    if cfg.stage == "rl":
-        imag = cfg.get("imagination", {})
-        if str(imag.get("policy_loss", "pmpo")) == "ppo" and int(imag.get("ppo_epochs", 1)) > 1:
-            # PPO multi-epoch uses manual optimization; clip in RLModule._clip_and_step.
-            grad_clip = None
-
     return L.Trainer(
         max_steps=cfg.train.max_steps,
         accelerator=cfg.train.accelerator,
         devices=devices,
         strategy=strategy,
         precision=cfg.train.precision,
-        gradient_clip_val=grad_clip,
+        gradient_clip_val=cfg.train.get("grad_clip"),
         log_every_n_steps=cfg.log.every_n_steps,
         check_val_every_n_epoch=0 if step_val else 1,
         limit_val_batches=limit_val_batches,

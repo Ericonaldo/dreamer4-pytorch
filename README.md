@@ -12,7 +12,7 @@ Three-stage pipeline (paper-aligned); configs under `configs/walker_walk/`:
 |-------|------|-------------|-------------------|
 | **1** | **Tokenizer** | Causal patch **encoder + decoder**; block-causal transformer with **MAE** random patch masking → latent bottleneck `z_t` + recon loss | `tokenizer.yaml`, `tokenizer_5m.yaml` |
 | **2** | **Pretraining** | **BC + dynamics** on frozen tokenizer encode: joint **flow matching** (`wm_dynamics`) and **BC** action/reward MTP (`wm_agent`) on one backbone; optional `dynamics.yaml` warm start | `bc_dynamics.yaml`, `bc_dynamics_10m.yaml` (also `bc.yaml` for BC-only finetune) |
-| **3** | **Posttraining** | **RL** in latent imagination: rollout with learned dynamics + policy, value head on TD(λ) returns (not BC MTP) | `policy_imagination_pmpo.yaml` / `policy_imagination_ppo.yaml` |
+| **3** | **Posttraining** | **RL** in latent imagination: rollout with learned dynamics + policy, value head on TD(λ) returns (not BC MTP) | `policy_imagination_pmpo.yaml` |
 
 Stage 1 decoder is dropped at inference for downstream stages (encode-only). Stage 3 uses imagined trajectories, not dataset BC labels.
 
@@ -130,7 +130,7 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [x] Latent temporal collapse — tune `embed_dim` / `latent_dim` (default configs: `embed_dim=64`, `latent_dim=32`, `patch_size=8`, `n_latents=16`; large 512-dim runs collapsed); monitor `tokenizer/z_temporal_std`
 - [x] Robust checkpoint pruning (`KeepLastCheckpoints` handles Lightning `-v1` suffixes, rank-0 only)
 - [x] Resume from Lightning checkpoint (`train.resume_ckpt`)
-- [ ] Standalone tokenizer eval script (recon metrics + panels from checkpoint) — see `eval_tokenizer.py`
+- [x] Standalone tokenizer eval script (recon metrics + panels from checkpoint) — see `eval_tokenizer.py`
 - [ ] Ablation: `scale_pos_embeds` off (paper notes it can help)
 
 ### Dynamics (stage 2)
@@ -159,9 +159,9 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 
 ### Policy / imagination (stage 4)
 
-- [ ] `imagine_rollout` in latent space (`imagination.py` stub)
-- [ ] `RLModule` — imagination RL on top of BC (`modules/rl.py`); value head with TD(λ) return targets
-- [x] Config `configs/walker_walk/policy_imagination_pmpo.yaml` / `policy_imagination_ppo.yaml`
+- [x] `imagine_rollout` in latent space (`imagination.py` stub)
+- [x] `RLModule` — imagination RL on top of BC (`modules/rl.py`); value head with TD(λ) return targets
+- [x] Config `configs/walker_walk/policy_imagination_pmpo.yaml`
 
 ### Data & infra
 
@@ -193,7 +193,7 @@ See **Training stages** above. Runnable configs:
 |-------|--------|-------|
 | 1 Tokenizer | `tokenizer.yaml`, `tokenizer_5m.yaml` | MAE encoder–decoder |
 | 2 Pretraining | `bc_dynamics.yaml`, `bc_dynamics_10m.yaml` | Joint flow + BC; optional `dynamics.yaml` init |
-| 3 Posttraining | `policy_imagination_pmpo.yaml` / `policy_imagination_ppo.yaml` | Imagination RL (PMPO or PPO) + async env eval |
+| 3 Posttraining | `policy_imagination_pmpo.yaml` | Imagination RL (PMPO) + async env eval |
 
 ```bash
 # Full model
@@ -215,36 +215,25 @@ uv run dreamer4-train configs/walker_walk/tokenizer.yaml \
   train.devices=8 \
   data.num_workers=4 \
   log.wandb=true
-
-# Same on embo (after uv sync)
-cd ~/mhliu/dreamer4-pytorch
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-  .venv/bin/python -m dreamer4.cli configs/walker_walk/tokenizer.yaml \
-  train.devices=8 \
-  data.num_workers=4 \
-  log.wandb=true
 ```
 
 Tune `train.batch_size` if OOM; scale `data.num_workers` per GPU (e.g. 2–4).
 
-### Imagination RL (PMPO / PPO)
+### Imagination RL (PMPO)
 
 Stage `rl` on frozen tokenizer + dynamics + BC reward; trains value + policy in latent imagination. Optional local notes: `analysis/imagination_rl.md` (gitignored).
 
+We previously supported an optional PPO path but removed it: clipped PPO in latent imagination tended to explode easily (ratio blow-ups, unstable policy updates, env return collapse) despite stabilization attempts; this repo now trains PMPO only.
+
 **Prerequisites:** `tokenizer_ckpt` and `bc_ckpt` in the yaml (default: `bc_dynamics_10m/last.ckpt`). **Start from BC, not a corrupted RL checkpoint.**
 
-| Config | `imagination.policy_loss` | Default warmup | Notes |
-|--------|---------------------------|----------------|-------|
-| `policy_imagination_pmpo.yaml` | `pmpo` | 500 steps | `policy_lr: 1e-4`; `pmpo_min_balance_frac: 0.1` (**repo extension**, not in paper/jax — skips policy step when advantage signs are imbalanced; set `0` to match ref) |
-| `policy_imagination_ppo.yaml` | `ppo` | 200 steps | `normalize_advantages` default on |
+| Config | Default warmup | Notes |
+|--------|----------------|-------|
+| `policy_imagination_pmpo.yaml` | 500 steps | `policy_lr: 3e-5`; `pmpo_min_balance_frac: 0.1` (**repo extension**, not in paper/jax — skips policy step when advantage signs are imbalanced; set `0` to match ref) |
 
 ```bash
 # PMPO (Dreamer4 paper default)
 uv run dreamer4-train configs/walker_walk/policy_imagination_pmpo.yaml \
-  log.wandb=true
-
-# PPO (alternative)
-uv run dreamer4-train configs/walker_walk/policy_imagination_ppo.yaml \
   log.wandb=true
 
 # 8 GPUs (server; headless MuJoCo)
@@ -254,10 +243,10 @@ MUJOCO_GL=egl CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   log.run_name=walker_walk/rl_pmpo log.wandb=true
 
 # Smoke (1 GPU, no wandb)
-uv run dreamer4-train configs/walker_walk/policy_imagination_ppo.yaml \
+uv run dreamer4-train configs/walker_walk/policy_imagination_pmpo.yaml \
   train.max_steps=100 train.devices=1 train.batch_size=32 \
   train.val_every=100 log.wandb=false \
-  log.run_name=walker_walk/rl_ppo_smoke
+  log.run_name=walker_walk/rl_pmpo_smoke eval.env_eval=false
 ```
 
 `val/env_return_mean` from async env eval (`eval.env_eval: true`, every `train.val_every` steps). Override checkpoints:
@@ -370,33 +359,6 @@ uv run python -m dreamer4.eval_dynamics_rollout $CFG \
 
 Outputs: `videos/rollout_video_ep*_ret*.mp4` (predicted frames) and `videos/rollout_video_ep*_ret*_gt_pred.mp4` (GT over pred), plus `video_metrics.json`.
 
-On `embo`, use `.venv/bin/dreamer4-eval` and `.venv/bin/python` if `uv` is unavailable; data symlink: `data/dmc_walker_walk`.
-
-## Remote training
-
-Code is developed locally; experiments run on `ssh embo` at `~/mhliu/dreamer4-pytorch`.
-
-### Dataset (Google Drive, shared with your account)
-
-`rclone` is installed on `embo`. From your Mac (browser OAuth once):
-
-```bash
-brew install rclone   # if needed
-./scripts/rclone_setup_gdrive.sh      # log in with your Google account
-./scripts/rclone_download_walker.sh   # ~15GB, background on server
-./scripts/rclone_extract_walker.sh    # tar -> data/dmc_walker_walk
-```
-
-Monitor: `ssh embo tail -f ~/mhliu/rclone_download.log`
-
-
-```bash
-# On server (first time)
-cd ~/mhliu/dreamer4-pytorch
-uv sync
-uv run python -c "import torch; print(torch.cuda.device_count())"
-```
-
 ## Observation modes
 
 Set `data.obs_mode` in config:
@@ -440,6 +402,5 @@ configs/walker_walk/
   bc_dynamics.yaml
   bc_dynamics_10m.yaml
   policy_eval.yaml
-  policy_imagination_pmpo.yaml   # imagination.policy_loss: pmpo
-  policy_imagination_ppo.yaml    # imagination.policy_loss: ppo
+  policy_imagination_pmpo.yaml   # imagination RL (PMPO)
 ```

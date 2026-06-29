@@ -60,7 +60,6 @@ imagination:
   context_len_min: 8
   gamma: 0.997
   lambda_: 0.95
-  policy_loss: pmpo  # ref edwhu/dreamer4-jax
   alpha: 0.5
   beta: 0.3
   policy_warmup_steps: 500
@@ -76,7 +75,7 @@ train:
   val_max_batches: 8
   devices: 4
   accelerator: gpu
-  precision: 32-true  # RL policy PPO/PMPO numerically sensitive; BC/dynamics use bf16-mixed
+  precision: 32-true  # RL PMPO numerically sensitive; BC/dynamics use bf16-mixed
   grad_clip: 1.0
   optimizer:
     lr: 1.0e-4

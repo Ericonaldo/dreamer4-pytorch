@@ -513,48 +513,6 @@ def pmpo_policy_loss(
     return loss_neg + loss_pos, applied
 
 
-def _ppo_log_ratio_stats(
-    log_prob: torch.Tensor,
-    old_log_prob: torch.Tensor,
-    advantages: torch.Tensor,
-) -> dict[str, float]:
-    with torch.no_grad():
-        log_ratio = log_prob - old_log_prob
-        ratio = log_ratio.exp()
-        return {
-            "pi_log_ratio_min": float(log_ratio.min()),
-            "pi_log_ratio_max": float(log_ratio.max()),
-            "pi_log_ratio_mean": float(log_ratio.mean()),
-            "pi_ratio_max": float(ratio.max()),
-            "pi_ratio_p99": float(ratio.quantile(0.99)),
-            "pi_adv_min": float(advantages.min()),
-            "pi_adv_max": float(advantages.max()),
-            "pi_adv_mean": float(advantages.mean()),
-            "pi_adv_std": float(advantages.std()),
-        }
-
-
-def ppo_policy_loss(
-    log_prob: torch.Tensor,
-    old_log_prob: torch.Tensor,
-    advantages: torch.Tensor,
-    clip_eps: float,
-    *,
-    log_ratio_clip: float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Clipped PPO surrogate (Schulman et al.): maximize min(r·A, clip(r)·A)."""
-    log_ratio = log_prob - old_log_prob
-    if log_ratio_clip is not None:
-        log_ratio = torch.clamp(log_ratio, -log_ratio_clip, log_ratio_clip)
-    ratio = torch.exp(log_ratio)
-    surr1 = ratio * advantages
-    surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantages
-    loss = -torch.min(surr1, surr2).mean()
-    with torch.no_grad():
-        clipfrac = ((ratio - 1.0).abs() > clip_eps).float().mean()
-    return loss, clipfrac
-
-
 def imagination_rl_value_loss(
     hidden: torch.Tensor,
     imagined_actions: torch.Tensor,
@@ -594,46 +552,21 @@ def imagination_rl_value_loss(
     return val_loss, advantages, metrics
 
 
-def snapshot_ppo_old_log_prob(
-    h_pi: torch.Tensor,
-    imagined_actions: torch.Tensor,
-    heads: AgentHeads,
-) -> torch.Tensor:
-    """Behavior-policy log_prob for PPO multi-epoch (frozen before policy updates)."""
-    slot = POLICY_ENV_ACTION_SLOT
-    with torch.no_grad():
-        _, mean_u, log_std = heads.policy(h_pi)
-        return heads.policy.log_prob(
-            mean_u[:, :, slot],
-            log_std[:, :, slot],
-            imagined_actions.float(),
-        )
-
-
 def imagination_rl_policy_loss(
     h_pi: torch.Tensor,
-    imagined_actions: torch.Tensor,
     imagined_log_prob: torch.Tensor,
     advantages: torch.Tensor,
     heads: AgentHeads,
     policy_prior: SquashedGaussianHead,
     *,
     beta: float,
-    policy_loss: str = "pmpo",
     alpha: float = 0.5,
-    ppo_clip: float = 0.2,
-    ppo_log_ratio_clip: float | None = None,
     pmpo_min_balance_frac: float = 0.1,
     train_policy: bool = True,
-    ppo_old_log_prob: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, bool, dict[str, float]]:
-    """Policy + KL loss on imagined trajectories; returns (pi_loss, kl_loss, apply_policy, metrics)."""
+    """PMPO policy + KL loss on imagined trajectories; returns (pi_loss, kl_loss, apply_policy, metrics)."""
     slot = POLICY_ENV_ACTION_SLOT
-    imagined_actions_f = imagined_actions.float()
     imagined_log_prob_f = imagined_log_prob.detach().float()
-
-    pi_clipfrac = None
-    ppo_stats: dict[str, float] | None = None
 
     policy_ctx = torch.enable_grad() if train_policy else torch.no_grad()
     with policy_ctx:
@@ -641,39 +574,13 @@ def imagination_rl_policy_loss(
         if not torch.isfinite(mean_u).all():
             raise RuntimeError("non-finite policy mean_u in imagination_rl_loss")
 
-        if policy_loss == "pmpo":
-            pi_loss, pmpo_applied = pmpo_policy_loss(
-                imagined_log_prob_f,
-                advantages,
-                alpha,
-                min_balance_frac=pmpo_min_balance_frac,
-            )
-            apply_policy = train_policy and pmpo_applied
-        elif policy_loss == "ppo":
-            new_log_prob = heads.policy.log_prob(
-                mean_u[:, :, slot],
-                log_std[:, :, slot],
-                imagined_actions_f,
-            )
-            if ppo_old_log_prob is None:
-                old_log_prob = new_log_prob.detach()
-            else:
-                old_log_prob = ppo_old_log_prob
-            with torch.no_grad():
-                rollout_old = imagined_log_prob_f
-                pi_rollout_old_diff = float((rollout_old - old_log_prob).abs().max())
-            pi_loss, pi_clipfrac = ppo_policy_loss(
-                new_log_prob,
-                old_log_prob,
-                advantages,
-                ppo_clip,
-                log_ratio_clip=ppo_log_ratio_clip,
-            )
-            apply_policy = train_policy
-            ppo_stats = _ppo_log_ratio_stats(new_log_prob, rollout_old, advantages)
-            ppo_stats["pi_rollout_old_diff"] = pi_rollout_old_diff
-        else:
-            raise ValueError(f"Unknown policy_loss: {policy_loss!r} (expected 'pmpo' or 'ppo')")
+        pi_loss, pmpo_applied = pmpo_policy_loss(
+            imagined_log_prob_f,
+            advantages,
+            alpha,
+            min_balance_frac=pmpo_min_balance_frac,
+        )
+        apply_policy = train_policy and pmpo_applied
         _, mean_u_bc, log_std_bc = policy_prior(h_pi)
         kl = heads.policy.gaussian_kl(
             mean_u[:, :, slot],
@@ -694,12 +601,7 @@ def imagination_rl_policy_loss(
     if train_policy:
         metrics["pi_loss_raw"] = pi_loss_f
         metrics["pi_kl_loss_raw"] = kl_loss_f
-    if policy_loss == "pmpo":
-        metrics["pi_pmpo_applied"] = float(apply_policy)
-    if pi_clipfrac is not None:
-        metrics["pi_clipfrac"] = float(pi_clipfrac)
-    if ppo_stats is not None:
-        metrics.update(ppo_stats)
+    metrics["pi_pmpo_applied"] = float(apply_policy)
     return pi_loss, kl_loss, apply_policy, metrics
 
 
@@ -714,17 +616,13 @@ def imagination_rl_loss(
     gamma: float,
     lambda_: float,
     beta: float,
-    policy_loss: str = "pmpo",
     alpha: float = 0.5,
-    ppo_clip: float = 0.2,
-    ppo_log_ratio_clip: float | None = None,
     normalize_advantages: bool = False,
     pmpo_min_balance_frac: float = 0.1,
     train_policy: bool = True,
-    ppo_old_log_prob: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
-    Value CE on TD-λ targets + policy loss (PMPO or PPO) + KL(π || π_BC) on imagined trajectories.
+    Value CE on TD-λ targets + PMPO policy loss + KL(π || π_BC) on imagined trajectories.
 
     hidden: (B, H+1, D) agent states s_0..s_H (s_0 = last context state)
     imagined_actions: (B, H, A) policy actions a_1..a_H
@@ -745,19 +643,14 @@ def imagination_rl_loss(
     )
     pi_loss, kl_loss, apply_policy, policy_metrics = imagination_rl_policy_loss(
         h_pi,
-        imagined_actions,
         imagined_log_prob,
         advantages,
         heads,
         policy_prior,
         beta=beta,
-        policy_loss=policy_loss,
         alpha=alpha,
-        ppo_clip=ppo_clip,
-        ppo_log_ratio_clip=ppo_log_ratio_clip,
         pmpo_min_balance_frac=pmpo_min_balance_frac,
         train_policy=train_policy,
-        ppo_old_log_prob=ppo_old_log_prob,
     )
     metrics.update(policy_metrics)
 
