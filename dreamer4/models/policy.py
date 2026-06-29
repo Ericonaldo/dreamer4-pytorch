@@ -554,7 +554,7 @@ def imagination_rl_value_loss(
 
 def imagination_rl_policy_loss(
     h_pi: torch.Tensor,
-    imagined_log_prob: torch.Tensor,
+    imagined_actions: torch.Tensor,
     advantages: torch.Tensor,
     heads: AgentHeads,
     policy_prior: SquashedGaussianHead,
@@ -566,7 +566,7 @@ def imagination_rl_policy_loss(
 ) -> tuple[torch.Tensor, torch.Tensor, bool, dict[str, float]]:
     """PMPO policy + KL loss on imagined trajectories; returns (pi_loss, kl_loss, apply_policy, metrics)."""
     slot = POLICY_ENV_ACTION_SLOT
-    imagined_log_prob_f = imagined_log_prob.detach().float()
+    imagined_actions_f = imagined_actions.detach().float()
 
     policy_ctx = torch.enable_grad() if train_policy else torch.no_grad()
     with policy_ctx:
@@ -574,8 +574,13 @@ def imagination_rl_policy_loss(
         if not torch.isfinite(mean_u).all():
             raise RuntimeError("non-finite policy mean_u in imagination_rl_loss")
 
+        log_prob = heads.policy.log_prob(
+            mean_u[:, :, slot],
+            log_std[:, :, slot],
+            imagined_actions_f,
+        )
         pi_loss, pmpo_applied = pmpo_policy_loss(
-            imagined_log_prob_f,
+            log_prob,
             advantages,
             alpha,
             min_balance_frac=pmpo_min_balance_frac,
@@ -608,7 +613,6 @@ def imagination_rl_policy_loss(
 def imagination_rl_loss(
     hidden: torch.Tensor,
     imagined_actions: torch.Tensor,
-    imagined_log_prob: torch.Tensor,
     heads: AgentHeads,
     policy_prior: SquashedGaussianHead,
     value_head: SymExpTwoHotHead,
@@ -625,8 +629,7 @@ def imagination_rl_loss(
     Value CE on TD-λ targets + PMPO policy loss + KL(π || π_BC) on imagined trajectories.
 
     hidden: (B, H+1, D) agent states s_0..s_H (s_0 = last context state)
-    imagined_actions: (B, H, A) policy actions a_1..a_H
-    imagined_log_prob: (B, H) log π(a_t | s_{t-1}) at sampling time
+    imagined_actions: (B, H, A) policy actions a_1..a_H (fixed; log_prob recomputed for PMPO)
     """
     h = hidden.detach()
     H = imagined_actions.shape[1]
@@ -643,7 +646,7 @@ def imagination_rl_loss(
     )
     pi_loss, kl_loss, apply_policy, policy_metrics = imagination_rl_policy_loss(
         h_pi,
-        imagined_log_prob,
+        imagined_actions,
         advantages,
         heads,
         policy_prior,

@@ -162,6 +162,8 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [x] `imagine_rollout` in latent space (`imagination.py` stub)
 - [x] `RLModule` — imagination RL on top of BC (`modules/rl.py`); value head with TD(λ) return targets
 - [x] Config `configs/walker_walk/policy_imagination_pmpo.yaml`
+- [x] RL post-training stability: `init_value_head_from_reward_head`, policy warmup (value-only), `context_len_min`, `32-true` precision, PMPO log-prob recompute on fixed actions (see `analysis/imagination_rl.md`)
+- [x] Ablation config `policy_imagination_pmpo_nobalance.yaml` (`pmpo_min_balance_frac: 0`)
 
 ### Data & infra
 
@@ -221,15 +223,27 @@ Tune `train.batch_size` if OOM; scale `data.num_workers` per GPU (e.g. 2–4).
 
 ### Imagination RL (PMPO)
 
-Stage `rl` on frozen tokenizer + dynamics + BC reward; trains value + policy in latent imagination. Optional local notes: `analysis/imagination_rl.md` (gitignored).
+Stage `rl` on frozen tokenizer + dynamics + BC reward; trains value + policy in latent imagination. **Stability details (advantage bias, warmup, context, precision, PMPO log-prob):** see local `analysis/imagination_rl.md` (gitignored).
 
 We previously supported an optional PPO path but removed it: clipped PPO in latent imagination tended to explode easily (ratio blow-ups, unstable policy updates, env return collapse) despite stabilization attempts; this repo now trains PMPO only.
 
 **Prerequisites:** `tokenizer_ckpt` and `bc_ckpt` in the yaml (default: `bc_dynamics_10m/last.ckpt`). **Start from BC, not a corrupted RL checkpoint.**
 
+**RL post-training stability (defaults in yaml + code):**
+
+| Measure | Config / code | Why |
+|---------|---------------|-----|
+| Value init from BC reward | `init_value_head_from_reward_head()` in `RLModule` | Avoids \(V(s)\approx 0\) while imagined returns are ~5–15 → advantages almost all positive → PMPO destroys BC |
+| Value / policy warmup | `imagination.policy_warmup_steps: 500` | First N steps train **value only** (`train_policy=False`, policy `lr=0`); saves `warmup_end.ckpt` for resume |
+| Bounded imagination context | `imagination.context_len_min: 8` (+ `data.seq_len: 16`) | Rollout context suffix sampled in `[context_len_min, seq_len]` (not from length 1); set `context_len_min == seq_len` for fixed context |
+| Full fp32 RL training | `train.precision: 32-true` | BC/dynamics use `bf16-mixed`; PMPO `exp` / `atanh` / `Normal` / KL are numerically sensitive in mixed precision |
+
+Optional ablation: `policy_imagination_pmpo_nobalance.yaml` sets `pmpo_min_balance_frac: 0` (jax-like; no advantage sign-balance skip).
+
 | Config | Default warmup | Notes |
 |--------|----------------|-------|
-| `policy_imagination_pmpo.yaml` | 500 steps | `policy_lr: 3e-5`; `pmpo_min_balance_frac: 0.1` (**repo extension**, not in paper/jax — skips policy step when advantage signs are imbalanced; set `0` to match ref) |
+| `policy_imagination_pmpo.yaml` | 500 steps | `policy_lr: 3e-5`; `pmpo_min_balance_frac: 0.1` (**repo extension** — skips policy step when advantage signs are imbalanced) |
+| `policy_imagination_pmpo_nobalance.yaml` | 500 steps | Same as above with `pmpo_min_balance_frac: 0` |
 
 ```bash
 # PMPO (Dreamer4 paper default)

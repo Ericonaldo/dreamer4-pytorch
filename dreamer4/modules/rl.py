@@ -209,7 +209,6 @@ class RLModule(BaseModule):
         loss, metrics = imagination_rl_loss(
             rollout.hidden,
             rollout.actions,
-            rollout.log_prob,
             self.model.heads,
             self.policy_prior,
             self.value_head,

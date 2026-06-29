@@ -60,7 +60,7 @@ def imagine_latent_rollout(
         if not torch.isfinite(h).all():
             raise RuntimeError("non-finite agent hidden before policy sample in imagination rollout")
         h_in = h.unsqueeze(1)
-        # Sampling is not in the value-loss path; log_prob is recomputed in imagination_rl_loss for PMPO.
+        # Sampling under no_grad; PMPO re-evaluates log_prob on fixed actions in imagination_rl_policy_loss.
         with torch.no_grad():
             action_mtp, log_p_mtp, _, _ = policy.sample(h_in)
         slot = POLICY_ENV_ACTION_SLOT
