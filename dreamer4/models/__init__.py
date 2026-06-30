@@ -2,6 +2,7 @@ from dreamer4.models.dynamics import (
     DynamicsModel,
     flow_matching_loss,
     pack_bottleneck_to_spatial,
+    shortcut_forcing_loss,
 )
 from dreamer4.models.policy import (
     AgentHeads,
@@ -26,6 +27,7 @@ __all__ = [
     "bc_loss",
     "build_tokenizer",
     "flow_matching_loss",
+    "shortcut_forcing_loss",
     "imagination_rl_loss",
     "pack_bottleneck_to_spatial",
     "pmpo_policy_loss",

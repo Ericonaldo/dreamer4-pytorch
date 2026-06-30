@@ -342,10 +342,11 @@ class PolicyModel(nn.Module):
         """Pooled agent hidden states (B, T, d_model) from clean latents and actions."""
         B, T = packed_z.shape[:2]
         agent_tokens = self.agent_tokens.view(1, 1, self.n_agent, self.d_model).expand(B, T, -1, -1)
-        sigma = torch.zeros(B, T, device=packed_z.device, dtype=torch.float32)
+        step_idx, signal_idx = self.dynamics.clean_conditioning((B, T), packed_z.device)
         _, h_agent = self.dynamics(
             actions,
-            sigma,
+            step_idx,
+            signal_idx,
             packed_z,
             agent_tokens=agent_tokens,
             space_mode=space_mode or self.bc_space_mode,

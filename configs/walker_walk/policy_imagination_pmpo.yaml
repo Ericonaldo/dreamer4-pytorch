@@ -41,6 +41,7 @@ model:
     n_register: 4
     n_agent: 1
     action_dim: 6
+    k_max: 64
     space_modes: [wm_dynamics, wm_agent]
     space_mode: wm_dynamics
   action_horizon: 8

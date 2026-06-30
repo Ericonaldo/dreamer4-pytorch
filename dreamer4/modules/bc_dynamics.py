@@ -20,11 +20,11 @@ class BCDynamicsModule(BaseModule):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
         from dreamer4.models import PolicyModel, build_tokenizer, bc_loss
-        from dreamer4.models.dynamics import flow_matching_loss, pack_bottleneck_to_spatial
+        from dreamer4.models.dynamics import pack_bottleneck_to_spatial, shortcut_forcing_loss
 
         self._pack = pack_bottleneck_to_spatial
         self._bc_loss = bc_loss
-        self._flow_matching_loss = flow_matching_loss
+        self._shortcut_forcing_loss = shortcut_forcing_loss
         self._env_eval = AsyncPolicyEval()
 
         self.tokenizer = build_tokenizer(cfg.model.tokenizer)
@@ -55,6 +55,9 @@ class BCDynamicsModule(BaseModule):
         self.flow_weight = float(cfg.train.get("flow_weight", 1.0))
         self.action_weight = float(cfg.train.get("action_weight", 1.0))
         self.reward_weight = float(cfg.train.get("reward_weight", 1.0))
+        self.k_max = int(cfg.model.dynamics.get("k_max", 64))
+        self.shortcut_self_fraction = float(cfg.train.get("shortcut_self_fraction", 0.25))
+        self.shortcut_bootstrap_start = int(cfg.train.get("shortcut_bootstrap_start", 5000))
 
         self.rollout_ctx = int(cfg.train.get("rollout_ctx", 8))
         self.rollout_horizon = int(cfg.train.get("rollout_horizon", 8))
@@ -74,10 +77,17 @@ class BCDynamicsModule(BaseModule):
         with torch.no_grad():
             packed_z = self._encode_packed(image)
 
-        flow_loss, flow_metrics = self._flow_matching_loss(
+        B = packed_z.shape[0]
+        B_self = int(round(self.shortcut_self_fraction * B))
+        B_self = max(0, min(B - 1, B_self))
+        flow_loss, flow_metrics = self._shortcut_forcing_loss(
             self.model.dynamics,
             packed_z,
             action,
+            k_max=self.k_max,
+            B_self=B_self,
+            global_step=int(self.global_step),
+            bootstrap_start=self.shortcut_bootstrap_start,
             space_mode=self.dynamics_space_mode,
         )
         bc_outputs = self.model(packed_z, action, space_mode=self.bc_space_mode)
@@ -95,7 +105,7 @@ class BCDynamicsModule(BaseModule):
         dyn_prefix = "dynamics" if stage == "train" else "val"
         bc_prefix = "bc" if stage == "train" else "val"
         for key, value in flow_metrics.items():
-            prog = stage == "train" and key == "flow_mse"
+            prog = stage == "train" and key in ("flow_mse", "bootstrap_mse")
             self.log(f"{dyn_prefix}/{key}", value, prog_bar=prog, sync_dist=stage == "train")
         for key, value in bc_metrics.items():
             prog = stage == "train" and key in ("action_nll", "action_mse", "action_out_mean")

@@ -21,6 +21,7 @@ class Modality(IntEnum):
     SPATIAL = 4
     NOISE = 5
     AGENT = 6
+    STEP = 7
 
 
 @dataclass(frozen=True)
@@ -236,11 +237,13 @@ class SpaceSelfAttentionModality(nn.Module):
                 (q_mod == int(Modality.SPATIAL))
                 | (q_mod == int(Modality.REGISTER))
                 | (q_mod == int(Modality.NOISE))
+                | (q_mod == int(Modality.STEP))
             )
             is_obs_k = (
                 (k_mod == int(Modality.SPATIAL))
                 | (k_mod == int(Modality.REGISTER))
                 | (k_mod == int(Modality.NOISE))
+                | (k_mod == int(Modality.STEP))
             )
             allow_agent_q = torch.ones((S, S), dtype=torch.bool, device=device)
             allow_for_action = is_k_action
