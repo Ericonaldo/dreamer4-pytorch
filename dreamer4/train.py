@@ -24,7 +24,7 @@ def _window_mode(cfg: DictConfig) -> str:
     mode = str(cfg.data.get("window_mode", "auto"))
     if mode != "auto":
         return mode
-    return "transition" if cfg.stage in ("dynamics", "bc", "bc_dynamics", "rl") else "frame"
+    return "transition" if cfg.stage in ("bc_dynamics", "rl") else "frame"
 
 
 def _episode_dataset(cfg: DictConfig, episode_indices: list[int] | None) -> GranularEpisodeDataset:
@@ -120,7 +120,7 @@ def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool, val_loader: Dat
     strategy = "auto"
     devices = cfg.train.devices
     if isinstance(devices, int) and devices > 1:
-        ddp_unused = cfg.stage in ("bc", "bc_dynamics", "rl")
+        ddp_unused = cfg.stage in ("bc_dynamics", "rl")
         strategy = "ddp_find_unused_parameters_true" if ddp_unused else "ddp"
 
     val_every = int(cfg.train.get("val_every", 0) or 0)

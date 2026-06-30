@@ -50,8 +50,6 @@ class BCDynamicsModule(BaseModule):
             latent_dim=latent_dim,
             heads_cfg=cfg.model,
         )
-        if cfg.get("dynamics_ckpt"):
-            load_state(self.model.dynamics, cfg.dynamics_ckpt, prefix="model.")
 
         self.dynamics_space_mode = self.model.dynamics_space_mode
         self.bc_space_mode = self.model.bc_space_mode

@@ -8,16 +8,16 @@ data:
   val_fraction: 0.05
   val_seed: 0
 
-tokenizer_ckpt: logs/walker_walk/tokenizer/checkpoints/step-step=20000.ckpt
-dynamics_ckpt: null  # optional warm start from dynamics-only pretrain
+# Must match tokenizer.yaml arch (frozen encode only; default log run_name: walker_walk/tokenizer_5m).
+tokenizer_ckpt: logs/walker_walk/tokenizer_5m/checkpoints/step-step=20000.ckpt
 
 model:
   tokenizer:
     image_size: 64
     channels: 3
-    patch_size: 8
+    patch_size: 4
     n_latents: 16
-    embed_dim: 64
+    embed_dim: 128
     depth: 8
     num_heads: 4
     mlp_ratio: 2.0
@@ -29,8 +29,9 @@ model:
     mae_p_min: 0.0
     mae_p_max: 0.0
   dynamics:
-    embed_dim: 64
-    depth: 8
+    # ~100M trainable (dynamics + BC heads); ref uses 512d/8L/mlp4 (~43M dynamics only)
+    embed_dim: 256
+    depth: 16
     num_heads: 4
     mlp_ratio: 2.0
     dropout: 0.0
@@ -43,8 +44,8 @@ model:
     space_modes: [wm_dynamics, wm_agent]  # flow uses wm_dynamics, BC uses wm_agent (auto)
     space_mode: wm_dynamics  # default for flow / rollout when space_mode omitted
   action_horizon: 8
-  policy_hidden: 256
-  reward_hidden: 256
+  policy_hidden: 512
+  reward_hidden: 512
   reward_bins: 255
   reward_symexp_span: 20.0
   reward_layers: 1
@@ -52,8 +53,8 @@ model:
   log_std_max: 2.0
 
 train:
-  batch_size: 128
-  max_steps: 100_000
+  batch_size: 32  # per GPU; reduce if OOM (~100M backbone)
+  max_steps: 50_000
   checkpoint_every: 2000
   checkpoint_keep_last: 5
   val_every: 1000
@@ -69,14 +70,14 @@ train:
   precision: bf16-mixed
   grad_clip: 1.0
   optimizer:
-    lr: 1.0e-3
+    lr: 5e-4
     betas: [0.9, 0.95]
     weight_decay: 0.01
     use_scheduler: true
 
 log:
   dir: logs
-  run_name: walker_walk/bc_dynamics
+  run_name: walker_walk/bc_dynamics_10m
   every_n_steps: 100
   wandb: true
   project: dreamer4-walker-walk
@@ -91,7 +92,7 @@ eval:
   camera_id: -1
   proprio: false
   image: true
-  episodes: 10
-  num_envs: 4
+  episodes: 8
+  num_envs: 8
   gpu_ids: all
   env_eval: true

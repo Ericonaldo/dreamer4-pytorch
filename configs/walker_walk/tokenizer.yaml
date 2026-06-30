@@ -11,9 +11,9 @@ data:
 model:
   image_size: 64
   channels: 3
-  patch_size: 8
+  patch_size: 4
   n_latents: 16
-  embed_dim: 64
+  embed_dim: 128
   depth: 8
   num_heads: 4
   mlp_ratio: 2.0
@@ -26,8 +26,8 @@ model:
   mae_p_max: 0.9
 
 train:
-  batch_size: 128
-  max_steps: 10_000
+  batch_size: 64
+  max_steps: 20_000
   checkpoint_every: 1000
   checkpoint_keep_last: 5
   val_every: 100
@@ -48,7 +48,7 @@ train:
 
 log:
   dir: logs
-  run_name: walker_walk/tokenizer
+  run_name: walker_walk/tokenizer_5m
   every_n_steps: 100
   wandb: true
   project: dreamer4-walker-walk

@@ -46,8 +46,6 @@ def load_bc_modules(
             if k.startswith("model.") and "attn_mask" not in k
         }
         model.load_state_dict(filtered, strict=False)
-    elif cfg.get("dynamics_ckpt"):
-        load_state(model.dynamics, cfg.dynamics_ckpt, prefix="model.")
 
     tokenizer.eval()
     model.eval()

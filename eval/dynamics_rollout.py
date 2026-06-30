@@ -44,13 +44,13 @@ Episode selection
 Example::
 
     uv run python -m eval.dynamics_rollout \\
-      configs/walker_walk/dynamics.yaml \\
+      configs/walker_walk/bc_dynamics.yaml \\
       --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \\
       --out-dir logs/walker_walk/dynamics/rollout_eval \\
       --split val --max-items 4
 
     uv run python -m eval.dynamics_rollout \\
-      configs/walker_walk/dynamics.yaml \\
+      configs/walker_walk/bc_dynamics.yaml \\
       --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \\
       --out-dir logs/walker_walk/dynamics/rollout_videos \\
       --rollout-video --rollout-length 64 --attn-window 8 --max-items 2
@@ -187,7 +187,7 @@ def _dynamics_model_cfg(cfg: DictConfig) -> tuple[dict[str, Any], int, str]:
         dyn = OmegaConf.to_container(cfg.model.dynamics, resolve=True)
         pf = int(cfg.model.dynamics.get("packing_factor", 1))
         stage = str(cfg.get("stage", ""))
-        prefix = "model.dynamics." if stage in ("bc", "bc_dynamics", "rl") else "model."
+        prefix = "model.dynamics." if stage in ("bc_dynamics", "rl") else "model."
         return dyn, pf, prefix
     raw = OmegaConf.to_container(cfg.model, resolve=True)
     pf = int(cfg.model.get("packing_factor", 1))
@@ -438,24 +438,24 @@ def main() -> None:
         epilog="""
 Examples:
   # Val split, static panels + metrics (uses train.rollout_ctx / rollout_horizon)
-  python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \\
+  python -m eval.dynamics_rollout configs/walker_walk/bc_dynamics.yaml \\
     --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \\
     --out-dir logs/walker_walk/dynamics/rollout_eval --split val
 
   # Long rollout videos: context=obs[0], sliding attention after L frames
-  python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \\
+  python -m eval.dynamics_rollout configs/walker_walk/bc_dynamics.yaml \\
     --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \\
     --out-dir logs/walker_walk/dynamics/rollout_videos \\
     --rollout-video --rollout-length 64 --attn-window 8 --video-fps 15
 
   # Rollout on high-return episodes only
-  python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \\
+  python -m eval.dynamics_rollout configs/walker_walk/bc_dynamics.yaml \\
     --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \\
     --out-dir logs/walker_walk/dynamics/rollout_expert \\
     --min-episode-return 970 --max-items 2
 
   # Per reward band (fallen / weak / expert, ...)
-  python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \\
+  python -m eval.dynamics_rollout configs/walker_walk/bc_dynamics.yaml \\
     --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \\
     --out-dir logs/walker_walk/dynamics/rollout_bands --by-reward-bands
 """,

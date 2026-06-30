@@ -8,7 +8,7 @@ data:
   val_fraction: 0.05
   val_seed: 0
 
-# Warm-start from joint BC+dynamics checkpoint (same arch as bc_dynamics_10m).
+# Warm-start from joint BC+dynamics checkpoint (same arch as bc_dynamics.yaml).
 tokenizer_ckpt: logs/walker_walk/tokenizer_5m/checkpoints/step-step=20000.ckpt
 bc_ckpt: logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt
 

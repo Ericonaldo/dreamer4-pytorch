@@ -10,8 +10,8 @@ Three-stage pipeline (paper-aligned); configs under `configs/walker_walk/`:
 
 | Stage | Name | What trains | Config (this repo) |
 |-------|------|-------------|-------------------|
-| **1** | **Tokenizer** | Causal patch **encoder + decoder**; block-causal transformer with **MAE** random patch masking → latent bottleneck `z_t` + recon loss | `tokenizer.yaml`, `tokenizer_5m.yaml` |
-| **2** | **Pretraining** | **BC + dynamics** on frozen tokenizer encode: joint **flow matching** (`wm_dynamics`) and **BC** action/reward MTP (`wm_agent`) on one backbone; optional `dynamics.yaml` warm start | `bc_dynamics.yaml`, `bc_dynamics_10m.yaml` (also `bc.yaml` for BC-only finetune) |
+| **1** | **Tokenizer** | Causal patch **encoder + decoder**; block-causal transformer with **MAE** random patch masking → latent bottleneck `z_t` + recon loss | `tokenizer.yaml`, `tokenizer_w_lpips.yaml` |
+| **2** | **Pretraining** | **BC + dynamics** on frozen tokenizer encode: joint **flow matching** (`wm_dynamics`) and **BC** action/reward MTP (`wm_agent`) on one backbone | `bc_dynamics.yaml` |
 | **3** | **Posttraining** | **RL** in latent imagination: rollout with learned dynamics + policy, value head on TD(λ) returns (not BC MTP) | `policy_imagination_pmpo.yaml` |
 
 Stage 1 decoder is dropped at inference for downstream stages (encode-only). Stage 3 uses imagined trajectories, not dataset BC labels.
@@ -25,7 +25,7 @@ Symbols: `B` batch, `T` aligned timesteps, `A=6` action dim, `L=8` MTP horizon, 
 | Stage | `window_mode` | Raw window from dataset | Model batch |
 |-------|---------------|-------------------------|-------------|
 | Tokenizer | `frame` | `seq_len` consecutive frames | `image (B,T,H,W,C)` — one frame per step is typical |
-| Dynamics / BC / bc_dynamics | `transition` | obs `[s0..sT]` (**T+1** frames), actions `[a1..aT]`, rewards `[r1..rT]` (**T** transitions) | see table below |
+| bc_dynamics / rl | `transition` | obs `[s0..sT]` (**T+1** frames), actions `[a1..aT]`, rewards `[r1..rT]` (**T** transitions) | see table below |
 
 Dreamer transition: `s_{t-1} -- a_t --> s_t`, reward `r_t` labels the step into `s_t`.  
 `align_dynamics_batch` prepends **NULL** action/reward at `t=0` so every row shares the same index as the observation:
@@ -66,14 +66,14 @@ Per timestep t, build spatial token sequence (dim S = 2+S_sp+R+N = 15 by default
   σ_t:      flow noise level (B,T) → MLP → (B,T,1,D); 0 at BC inference
   z̄_t:      packed latents (B,T,S_sp,D_sp) → Linear → (B,T,S_sp,D)
   reg:      learned register (B,T,R,D)
-  agent_t:  zeros at dynamics pretrain; learned (B,T,N,D) at BC
+  agent_t:  learned (B,T,N,D); flow uses wm_dynamics mask, BC uses wm_agent mask
 
   x = cat over slots → (B,T,S,D) → block-causal transformer →
     spatial out → x̂₁ (B,T,S_sp,D_sp)   flow head, predict clean z̄
     agent out   → h_t (B,T,N,D)         BC readout slot
 ```
 
-**BC** (`PolicyModel`, stage `bc` or heads-only finetune):
+**BC heads** (`PolicyModel` + `AgentHeads`, trained jointly in stage 2):
 ```
 h = mean(h_t, dim agent)  (B,T,D)
 AgentHeads(h):
@@ -98,9 +98,6 @@ Two forwards per step, different space attention masks (space_modes: [wm_dynamic
      → h_t → AgentHeads → bc_loss (action NLL + reward twohot CE)
 
   loss = flow_weight · loss_flow + bc_loss
-
-BC-only stage (`bc`) uses wm_agent only; dynamics-only pretrain uses wm_dynamics with agent_t = 0.
-Optional warm start: dynamics_ckpt from stage 2, then joint train flow + BC heads together.
 ```
 
 ## TODO
@@ -133,31 +130,23 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [x] Standalone tokenizer eval script (recon metrics + panels from checkpoint) — see `eval/tokenizer.py`
 - [ ] Ablation: `scale_pos_embeds` off (paper notes it can help)
 
-### Dynamics (stage 2)
+### Pretraining (stage 2 — BC + dynamics)
 
 - [x] `DynamicsModel` — action + noise-conditioned flow on packed tokenizer latents
 - [x] Simple flow-matching loss (empirical MSE on clean latents, no shortcut/bootstrap)
-- [x] `DynamicsModule` training with frozen tokenizer encode
-- [ ] Shortcut forcing + bootstrap self-consistency loss (ref `dynamics_pretrain_loss` self branch); Discrete noise schedule / `k_max` grid (ref uses finest-step flow grid)
-- [x] Agent token slot — `n_agent=1`, zero agent at pretrain, `wm_dynamics` (ref `wm_agent_isolated`); `forward` returns `h_t` for BC
-- [x] `wm_agent` space mask — agent attends world; world/action ignore agent keys
-- [x] Action-conditioned rollout eval — dataset actions, autoregressive latent sampling, decode, `val/rollout_mse` / PSNR vs floor, wandb viz
-- [x] Standalone rollout eval script — panels, return-band sweeps, long mp4 rollouts (`eval_dynamics_rollout.py`)
-- [x] Dynamics config aligned with tokenizer ckpt (`tokenizer_ckpt`, arch in `dynamics.yaml`)
-
-### BC (stage 3)
-
-- [x] `PolicyModel` — dynamics init (`dynamics_ckpt`), `wm_agent`, learned agent tokens, `AgentHeads` (L-step action NLL + reward symexp twohot MTP; no value head in BC)
-- [x] `BCModule` training with frozen tokenizer encode
 - [x] `BCDynamicsModule` — joint flow + BC on shared backbone (`bc_dynamics.yaml`)
-- [x] Config `configs/walker_walk/bc.yaml`, `bc_dynamics.yaml`
+- [ ] Shortcut forcing + bootstrap self-consistency loss (ref `dynamics_pretrain_loss` self branch); Discrete noise schedule / `k_max` grid (ref uses finest-step flow grid)
+- [x] Agent token slot — `n_agent=1`, learned `agent_tokens`, dual space masks (`wm_dynamics`, `wm_agent`)
+- [x] Action-conditioned rollout eval — dataset actions, autoregressive latent sampling, decode, `val/rollout_mse` / PSNR vs floor, wandb viz
+- [x] Standalone rollout eval script — panels, return-band sweeps, long mp4 rollouts (`eval/dynamics_rollout.py`)
+- [x] `PolicyModel` + `AgentHeads` — L-step action NLL + reward symexp twohot MTP (no value head in pretrain)
 - [ ] ~`TaskEmbedder` for multi-task BC — skipped for now: only Walker Walk is implemented, so a single learned `agent_tokens` parameter is enough and avoids an extra embedding table with no conditioning signal; add when training multiple tasks on shared weights~
 - [ ] **Reward MTP readout switch (config)** — selectable via YAML, not implemented yet:
   - `symexp_twohot` (current): `SymExpTwoHotHead` + twohot CE; raw rewards from dataloader, **no norm**
   - `mse`: simple MLP → scalar `(B,T,L)` + MSE on L-step future rewards; **normalize rewards in dataloader** (e.g. running mean/std or fixed scale in `data` / `train` config); denorm for metrics only
   - Config sketch: `model.reward_head: symexp_twohot | mse`; when `mse`, add `data.reward_norm` (or `train.reward_norm`) for dataloader stats / clip range
 
-### Policy / imagination (stage 4)
+### Imagination RL (stage 3)
 
 - [x] `imagine_latent_rollout` in latent space (`modules/rl.py`)
 - [x] `RLModule` — imagination RL on top of BC (`modules/rl.py`); value head with TD(λ) return targets
@@ -192,8 +181,8 @@ See **Training stages** above. Runnable configs:
 
 | Stage | Config | Notes |
 |-------|--------|-------|
-| 1 Tokenizer | `tokenizer.yaml`, `tokenizer_5m.yaml` | MAE encoder–decoder |
-| 2 Pretraining | `bc_dynamics.yaml`, `bc_dynamics_10m.yaml` | Joint flow + BC; optional `dynamics.yaml` init |
+| 1 Tokenizer | `tokenizer.yaml`, `tokenizer_w_lpips.yaml` | MAE encoder–decoder |
+| 2 Pretraining | `bc_dynamics.yaml` | Joint flow + BC on one backbone |
 | 3 Posttraining | `policy_imagination_pmpo.yaml` | Imagination RL (PMPO) + async env eval |
 
 ```bash
@@ -226,7 +215,7 @@ Stage `rl` on frozen tokenizer + dynamics + BC reward; trains value + policy in 
 
 We previously supported an optional PPO path but removed it: clipped PPO in latent imagination tended to explode easily (ratio blow-ups, unstable policy updates, env return collapse) despite stabilization attempts; this repo now trains PMPO only.
 
-**Prerequisites:** `tokenizer_ckpt` and `bc_ckpt` in the yaml (default: `bc_dynamics_10m/last.ckpt`). **Start from BC, not a corrupted RL checkpoint.**
+**Prerequisites:** `tokenizer_ckpt` and `bc_ckpt` in the yaml (default: `bc_dynamics` run / `last.ckpt`). **Start from a bc_dynamics checkpoint, not a corrupted RL checkpoint.**
 
 **RL post-training stability (defaults in yaml + code):**
 
@@ -299,35 +288,35 @@ Script: `eval/dynamics_rollout.py`. Loads frozen tokenizer + dynamics checkpoint
 
 ```bash
 # Panels + metrics on val split
-uv run python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \
-  --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \
-  --out-dir logs/walker_walk/dynamics/rollout_eval \
+uv run python -m eval.dynamics_rollout configs/walker_walk/bc_dynamics.yaml \
+  --dynamics-ckpt logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt \
+  --out-dir logs/walker_walk/bc_dynamics_10m/rollout_eval \
   --split val --max-items 4
 
 # 64-step rollout mp4s (context obs[0], attn window 8)
-uv run python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \
-  --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \
-  --out-dir logs/walker_walk/dynamics/rollout_videos \
+uv run python -m eval.dynamics_rollout configs/walker_walk/bc_dynamics.yaml \
+  --dynamics-ckpt logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt \
+  --out-dir logs/walker_walk/bc_dynamics_10m/rollout_videos \
   --rollout-video --rollout-length 64 --attn-window 8 --max-items 2
 
 # Rollout stratified by cumulative return
-uv run python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \
-  --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \
-  --out-dir logs/walker_walk/dynamics/rollout_bands \
+uv run python -m eval.dynamics_rollout configs/walker_walk/bc_dynamics.yaml \
+  --dynamics-ckpt logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt \
+  --out-dir logs/walker_walk/bc_dynamics_10m/rollout_bands \
   --by-reward-bands --split val
 ```
 
 ### BC policy eval (online DMC)
 
-CLI: `dreamer4-eval` (`eval/policy.py`) — thin wrapper over `dreamer4/agent.py` and `dreamer4/eval_utils.py` (`BCPolicy`, `run_bc_env_eval`, `AsyncBCEval`). Merges `configs/walker_walk/policy_eval.yaml` when present (`max_history: 16`, `episodes: 50`, `num_envs: 8`). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan + forward every env step); **L>1** = forward once then execute MTP slots `1..L` without re-forwarding, but still **encode every env frame** and commit actions into `(z, a)` history (capped by `model.action_horizon - 1`). Regenerate horizon sweep charts with `python -m dreamer4.plot_action_horizon_eval`.
+CLI: `dreamer4-eval` (`eval/policy.py`) — thin wrapper over `dreamer4/agent.py` and `dreamer4/eval_utils.py` (`BCPolicy`, `run_bc_env_eval`, `AsyncBCEval`). When the training YAML lives in `configs/walker_walk/`, merges `policy_eval.yaml` underneath it for heavier offline eval defaults (`episodes: 50`, `num_envs: 8`; training yaml `eval.episodes` is typically smaller). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan + forward every env step); **L>1** = forward once then execute MTP slots `1..L` without re-forwarding, but still **encode every env frame** and commit actions into `(z, a)` history (capped by `model.action_horizon - 1`). Regenerate horizon sweep charts with `python -m dreamer4.plot_action_horizon_eval`.
 
-**Multi-GPU**: `--gpus 8` splits 50 episodes across 8 GPUs; each GPU runs `eval.num_envs` parallel envs (8 in `bc_dynamics_10m.yaml`).
+**Multi-GPU**: `--gpus 8` splits 50 episodes across 8 GPUs; each GPU runs `eval.num_envs` parallel envs (8 in `policy_eval.yaml`).
 
 **Policy video** (`--video-out`): one online episode mp4; `--annotate-video` overlays `step 0, 1, …` (top-right) and episode return on the last frame.
 
 ```bash
 CKPT=logs/walker_walk/bc_dynamics_10m/checkpoints/step-step=50000.ckpt
-CFG=configs/walker_walk/bc_dynamics_10m.yaml
+CFG=configs/walker_walk/bc_dynamics.yaml
 
 # 50 episodes, 8 GPUs × 8 envs per GPU
 uv run dreamer4-eval $CFG --policy bc --bc-ckpt $CKPT \
@@ -346,7 +335,7 @@ Pick episodes by **full-episode cumulative return**, then extract a **64-step** 
 
 ```bash
 CKPT=logs/walker_walk/bc_dynamics_10m/checkpoints/step-step=50000.ckpt
-CFG=configs/walker_walk/bc_dynamics_10m.yaml
+CFG=configs/walker_walk/bc_dynamics.yaml
 
 # Expert trajectory (return >= 900)
 uv run python -m eval.dynamics_rollout $CFG \
@@ -392,8 +381,6 @@ dreamer4/
   modules/            # Lightning modules per stage
     base.py
     tokenizer.py
-    dynamics.py
-    bc.py
     bc_dynamics.py
     rl.py
   agent.py            # BCPolicy, load_bc_modules (online inference)
@@ -411,12 +398,8 @@ eval/                 # Standalone eval scripts + viz
   viz/                # Panel / frame annotations
 configs/walker_walk/
   tokenizer.yaml
-  tokenizer_5m.yaml
   tokenizer_w_lpips.yaml
-  dynamics.yaml
-  bc.yaml
   bc_dynamics.yaml
-  bc_dynamics_10m.yaml
   policy_eval.yaml
   policy_imagination_pmpo.yaml   # imagination RL (PMPO)
 ```
