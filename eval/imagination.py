@@ -36,7 +36,6 @@ from dreamer4.models.dynamics import (
     decode_packed_to_images,
     pack_bottleneck_to_spatial,
 )
-from dreamer4.models.tokenizer import encode_images
 from dreamer4.agent import load_bc_modules
 from eval.viz.annotate import annotate_frames_uint8
 from eval.viz.panels import rollout_panels_multictx_uint8
@@ -124,7 +123,7 @@ def _imagine_composite_frames(
 
     ctx_images = gt_segment[:, :ctx_k]
     ctx_actions = actions_segment[:, :ctx_k]
-    z_ctx = encode_images(tokenizer, ctx_images, patch_size)
+    z_ctx = tokenizer.encode_images(ctx_images, patch_size)
     packed_z_ctx = pack_bottleneck_to_spatial(z_ctx, n_spatial, packing_factor)
     z_imagined = _collect_imagined_latents(
         model,
@@ -269,7 +268,7 @@ def render_imagination_rollout_videos(
         gt_ctx = ctx_images
         gt_future = image[i : i + 1, horizon + context_len : horizon + context_len + horizon]
 
-        z_ctx = encode_images(tokenizer, ctx_images, patch_size)
+        z_ctx = tokenizer.encode_images(ctx_images, patch_size)
         packed_z_ctx = pack_bottleneck_to_spatial(z_ctx, n_spatial, packing_factor)
 
         z_imagined = _collect_imagined_latents(

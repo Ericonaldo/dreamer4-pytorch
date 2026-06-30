@@ -112,10 +112,8 @@ class RLModule(BaseModule):
         super().__init__(cfg)
         from dreamer4.models import PolicyModel, build_tokenizer
         from dreamer4.models.dynamics import pack_bottleneck_to_spatial
-        from dreamer4.models.tokenizer import encode_images
 
         self._pack = pack_bottleneck_to_spatial
-        self._encode_images = encode_images
 
         imag = cfg.imagination
         self.seq_len = int(cfg.data.seq_len)
@@ -203,7 +201,7 @@ class RLModule(BaseModule):
         }
 
     def _encode_packed(self, image_bthwc: torch.Tensor) -> torch.Tensor:
-        z = self._encode_images(self.tokenizer, image_bthwc, self.patch_size)
+        z = self.tokenizer.encode_images(image_bthwc)
         return self._pack(z, self.n_spatial, self.packing_factor)
 
     def _sample_context_window(

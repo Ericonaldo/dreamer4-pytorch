@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 from omegaconf import DictConfig
 
 from dreamer4.callbacks import log_recon_panel
@@ -20,41 +19,15 @@ class TokenizerModule(BaseModule):
         self._val_viz: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         self._val_viz_idx: int | None = None
 
-        self.use_lpips = bool(cfg.train.get("use_lpips", False))
-        self.lpips_weight = float(cfg.train.get("lpips_weight", 0.2))
-        self.lpips_frac = float(cfg.train.get("lpips_frac", 0.5))
-        self.lpips_net = str(cfg.train.get("lpips_net", "alex"))
-        self.lpips_fn: nn.Module | None = None
-        if self.use_lpips:
-            import lpips
-
-            self.lpips_fn = lpips.LPIPS(net=self.lpips_net)
-            self.lpips_fn.eval()
-            for p in self.lpips_fn.parameters():
-                p.requires_grad_(False)
-
-    def _lpips_kwargs(self) -> dict:
-        if not self.use_lpips or self.lpips_fn is None:
-            return {}
-        return {
-            "lpips_fn": self.lpips_fn,
-            "lpips_weight": self.lpips_weight,
-            "lpips_frac": self.lpips_frac,
-        }
-
     def _tokenizer_loss(self, image_bthwc: torch.Tensor):
         from dreamer4.models import tokenizer_forward_loss
 
-        return tokenizer_forward_loss(
-            self.model, image_bthwc, self.patch_size, **self._lpips_kwargs()
-        )
+        return tokenizer_forward_loss(self.model, image_bthwc, self.patch_size)
 
     def _tokenizer_eval(self, image_bthwc: torch.Tensor):
         from dreamer4.models import tokenizer_forward_with_aux
 
-        return tokenizer_forward_with_aux(
-            self.model, image_bthwc, self.patch_size, **self._lpips_kwargs()
-        )
+        return tokenizer_forward_with_aux(self.model, image_bthwc, self.patch_size)
 
     def _shared_step(self, batch, stage: str, *, capture_viz: bool = False) -> torch.Tensor:
         if batch.image is None:

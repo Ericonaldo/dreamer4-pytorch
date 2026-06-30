@@ -10,7 +10,7 @@ Three-stage pipeline (paper-aligned); configs under `configs/walker_walk/`:
 
 | Stage | Name | What trains | Config (this repo) |
 |-------|------|-------------|-------------------|
-| **1** | **Tokenizer** | Causal patch **encoder + decoder**; block-causal transformer with **MAE** random patch masking → latent bottleneck `z_t` + recon loss | `tokenizer.yaml`, `tokenizer_w_lpips.yaml` |
+| **1** | **Tokenizer** | Causal patch **encoder + decoder**; block-causal transformer with **MAE** random patch masking → latent bottleneck `z_t` + recon loss | `tokenizer.yaml` |
 | **2** | **Pretraining** | **BC + dynamics** on frozen tokenizer encode: joint **flow matching** (`wm_dynamics`) and **BC** action/reward MTP (`wm_agent`) on one backbone | `bc_dynamics.yaml` |
 | **3** | **Posttraining** | **RL** in latent imagination: rollout with learned dynamics + policy, value head on TD(λ) returns (not BC MTP) | `policy_imagination_pmpo.yaml` |
 
@@ -122,7 +122,6 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 
 - [x] Block-causal MAE encoder–decoder
 - [x] Train / val loop, step-based eval, reconstruction viz, wandb
-- [x] Optional LPIPS loss (`train.use_lpips`, `tokenizer_w_lpips.yaml`)
 - [x] Multi-GPU DDP
 - [x] Latent temporal collapse — tune `embed_dim` / `latent_dim` (default configs: `embed_dim=64`, `latent_dim=32`, `patch_size=8`, `n_latents=16`; large 512-dim runs collapsed); monitor `tokenizer/z_temporal_std`
 - [x] Robust checkpoint pruning (`KeepLastCheckpoints` handles Lightning `-v1` suffixes, rank-0 only)
@@ -181,7 +180,7 @@ See **Training stages** above. Runnable configs:
 
 | Stage | Config | Notes |
 |-------|--------|-------|
-| 1 Tokenizer | `tokenizer.yaml`, `tokenizer_w_lpips.yaml` | MAE encoder–decoder |
+| 1 Tokenizer | `tokenizer.yaml` | MAE encoder–decoder |
 | 2 Pretraining | `bc_dynamics.yaml` | Joint flow + BC on one backbone |
 | 3 Posttraining | `policy_imagination_pmpo.yaml` | Imagination RL (PMPO) + async env eval |
 
@@ -398,7 +397,6 @@ eval/                 # Standalone eval scripts + viz
   viz/                # Panel / frame annotations
 configs/walker_walk/
   tokenizer.yaml
-  tokenizer_w_lpips.yaml
   bc_dynamics.yaml
   policy_eval.yaml
   policy_imagination_pmpo.yaml   # imagination RL (PMPO)

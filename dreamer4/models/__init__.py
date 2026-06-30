@@ -14,7 +14,6 @@ from dreamer4.models.policy import (
 from dreamer4.models.tokenizer import (
     Tokenizer,
     build_tokenizer,
-    encode_images,
     tokenizer_forward_loss,
     tokenizer_forward_with_aux,
 )
@@ -26,7 +25,6 @@ __all__ = [
     "Tokenizer",
     "bc_loss",
     "build_tokenizer",
-    "encode_images",
     "flow_matching_loss",
     "imagination_rl_loss",
     "pack_bottleneck_to_spatial",

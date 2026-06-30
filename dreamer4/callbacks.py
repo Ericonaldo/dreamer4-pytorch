@@ -132,6 +132,12 @@ def _async_entry(
     gpu_ids: list[int | None],
     out_queue,
 ) -> None:
+    """Child-process entry for async BC env eval (spawn target for ``AsyncBCEval.start``).
+
+    Runs ``run_bc_env_eval`` in an isolated process so MuJoCo/DMC do not block training.
+    Writes ``run_dir/eval/env_step_{step:08d}.json`` and sends ``(step, metrics, err)``
+    to *out_queue* on completion or failure.
+    """
     os.environ.setdefault("MUJOCO_GL", "egl")
     try:
         cfg = OmegaConf.create(cfg_dict)
@@ -151,9 +157,18 @@ def _async_entry(
 
 
 class AsyncBCEval:
-    """Non-blocking BC env eval for training (rank 0 only)."""
+    """Non-blocking BC env eval for training (rank 0 only).
+
+    Spawns a separate process to roll out the policy in DMC while training continues.
+    Typical usage from a Lightning module:
+
+    - ``on_validation_epoch_end`` → ``start(...)``
+    - ``on_train_batch_end`` → ``poll(...)``
+    - ``on_train_end`` → ``drain(...)``
+    """
 
     def __init__(self) -> None:
+        """Initialize empty eval state (no process or queue until ``start``)."""
         self._proc: Process | None = None
         self._queue = None
         self._ctx = None
@@ -161,10 +176,12 @@ class AsyncBCEval:
 
     @property
     def running(self) -> bool:
+        """True while the eval child process is alive."""
         return self._proc is not None and self._proc.is_alive()
 
     @property
     def pending(self) -> bool:
+        """True while an eval is running or still being launched (state-dict copy + spawn)."""
         if self.running:
             return True
         t = self._launch_thread
@@ -178,6 +195,7 @@ class AsyncBCEval:
         tokenizer: nn.Module,
         run_dir: Path,
     ) -> None:
+        """Launch async env eval at *step*; skip if a previous eval is still active."""
         if self.pending or self._queue is not None:
             from lightning.pytorch.utilities import rank_zero_warn
 
@@ -189,6 +207,7 @@ class AsyncBCEval:
         gpu_ids = resolve_async_gpu_ids(cfg)
 
         def _launch() -> None:
+            # Copy weights on a daemon thread so the training step is not blocked.
             try:
                 model_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
                 tokenizer_state = {k: v.detach().cpu() for k, v in tokenizer.state_dict().items()}
@@ -214,12 +233,14 @@ class AsyncBCEval:
         self._launch_thread.start()
 
     def poll(self, module) -> None:
+        """Non-blocking check for eval results; log ``val/env_*`` metrics when ready."""
         if self._queue is None:
             return
         try:
             step, metrics, err = self._queue.get_nowait()
         except queue.Empty:
             return
+        # Result received; release queue/context and reap the child process in the background.
         proc = self._proc
         self._proc = None
         self._queue = None
@@ -243,6 +264,10 @@ class AsyncBCEval:
                 module.log(f"val/env_{key}", value, prog_bar=prog, sync_dist=False)
 
     def drain(self, module, *, timeout: float = 600.0) -> None:
+        """Block until pending eval finishes or *timeout* is reached.
+
+        Called from ``on_train_end`` so the last scheduled eval can log.
+        """
         deadline = time.time() + timeout
         while self.pending and time.time() < deadline:
             self.poll(module)

@@ -8,7 +8,7 @@ from omegaconf import DictConfig
 
 from dreamer4.config import config_to_dict
 
-from dreamer4.models.tokenizer import encode_images, temporal_unpatchify
+from dreamer4.models.tokenizer import temporal_unpatchify
 from dreamer4.models.transformer_blocks import (
     BlockCausalTransformer,
     Modality,
