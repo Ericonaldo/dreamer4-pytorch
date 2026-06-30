@@ -333,11 +333,6 @@ class RLModule(BaseModule):
         eval_cfg = self.cfg.get("eval", {})
         if not eval_cfg.get("env_eval", True):
             return
-        try:
-            from dreamer4.env import make_dmc_env  # noqa: F401
-        except ImportError as exc:
-            rank_zero_warn(f"Skipping RL env eval (install dreamer4[dmc]): {exc}")
-            return
 
         run_dir = Path(self.cfg.log.dir) / self.cfg.log.run_name
         self._env_eval.start(step, self.cfg, self.model, self.tokenizer, run_dir)

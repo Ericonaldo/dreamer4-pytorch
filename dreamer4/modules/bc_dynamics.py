@@ -168,11 +168,6 @@ class BCDynamicsModule(BaseModule):
         eval_cfg = self.cfg.get("eval", {})
         if not eval_cfg.get("env_eval", True):
             return
-        try:
-            from dreamer4.env import make_dmc_env  # noqa: F401
-        except ImportError as exc:
-            rank_zero_warn(f"Skipping BC env eval (install dreamer4[dmc]): {exc}")
-            return
 
         step = int(self.trainer.global_step)
         run_dir = Path(self.cfg.log.dir) / self.cfg.log.run_name

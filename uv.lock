@@ -394,8 +394,10 @@ name = "dreamer4-pytorch"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "dm-control" },
     { name = "granular" },
     { name = "imageio" },
+    { name = "imageio-ffmpeg" },
     { name = "lightning" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -409,13 +411,6 @@ dependencies = [
 dev = [
     { name = "ruff" },
 ]
-dmc = [
-    { name = "dm-control" },
-    { name = "imageio-ffmpeg" },
-]
-lpips = [
-    { name = "lpips" },
-]
 
 [package.dev-dependencies]
 dev = [
@@ -424,12 +419,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dm-control", marker = "extra == 'dmc'", specifier = ">=1.0.14" },
+    { name = "dm-control", specifier = ">=1.0.14" },
     { name = "granular" },
     { name = "imageio", specifier = ">=2.37.0" },
-    { name = "imageio-ffmpeg", marker = "extra == 'dmc'", specifier = ">=0.5.0" },
+    { name = "imageio-ffmpeg", specifier = ">=0.5.0" },
     { name = "lightning", specifier = ">=2.4.0" },
-    { name = "lpips", marker = "extra == 'lpips'", specifier = ">=0.1.4" },
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "omegaconf", specifier = ">=2.3.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
@@ -437,7 +431,7 @@ requires-dist = [
     { name = "torchvision", specifier = ">=0.19.0", index = "https://download.pytorch.org/whl/cu124" },
     { name = "wandb", specifier = ">=0.18.0" },
 ]
-provides-extras = ["dev", "lpips", "dmc"]
+provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ruff", specifier = ">=0.8.0" }]
@@ -761,24 +755,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f1/45/7fa8f56b17dc0f0a41ec70dd307ecd6787254483549843bef4c30ab5adce/lightning_utilities-0.15.3.tar.gz", hash = "sha256:792ae0204c79f6859721ac7f386c237a33b0ed06ba775009cb894e010a842033", size = 33553, upload-time = "2026-02-22T14:48:53.348Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/25/f4/ead6e0e37209b07c9baa3e984ccdb0348ca370b77cea3aaea8ddbb097e00/lightning_utilities-0.15.3-py3-none-any.whl", hash = "sha256:6c55f1bee70084a1cbeaa41ada96e4b3a0fea5909e844dd335bd80f5a73c5f91", size = 31906, upload-time = "2026-02-22T14:48:52.488Z" },
-]
-
-[[package]]
-name = "lpips"
-version = "0.1.4"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "torch" },
-    { name = "torchvision" },
-    { name = "tqdm" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/e8/2d/4b8148d32f5bd461eb7d5daa54fcc998f86eaa709a57f4ef6aa4c62f024f/lpips-0.1.4.tar.gz", hash = "sha256:3846331df6c69688aec3d300a5eeef6c529435bc8460bd58201c3d62e56188fa", size = 18029, upload-time = "2021-08-25T22:10:32.803Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/9b/13/1df50c7925d9d2746702719f40e864f51ed66f307b20ad32392f1ad2bb87/lpips-0.1.4-py3-none-any.whl", hash = "sha256:fd537af5828b69d2e6ffc0a397bd506dbc28ca183543617690844c08e102ec5e", size = 53763, upload-time = "2021-08-25T22:10:31.257Z" },
 ]
 
 [[package]]
