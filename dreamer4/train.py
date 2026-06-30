@@ -13,7 +13,6 @@ from torch.utils.data import DataLoader
 from dreamer4.callbacks import (
     KeepLastCheckpoints,
     SaveCheckpointAfterPolicyWarmup,
-    ValidateEveryNSteps,
 )
 from dreamer4.config import load_config, save_config
 from dreamer4.data import GranularEpisodeDataset, collate_episodes, split_episode_indices
@@ -90,7 +89,7 @@ def build_dataloaders(cfg: DictConfig) -> tuple[DataLoader, DataLoader | None]:
     return train_loader, val_loader
 
 
-def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool, val_loader: DataLoader | None = None) -> L.Trainer:
+def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool) -> L.Trainer:
     checkpoint_dir = run_dir / "checkpoints"
     checkpoint_every = int(cfg.train.checkpoint_every)
     keep_last = int(cfg.train.get("checkpoint_keep_last", 5))
@@ -125,11 +124,7 @@ def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool, val_loader: Dat
 
     val_every = int(cfg.train.get("val_every", 0) or 0)
     step_val = has_val and val_every > 0
-    limit_val_batches = 0 if step_val else (cfg.train.get("val_max_batches", 32) if has_val else 0)
-    if step_val and val_loader is not None:
-        callbacks.append(
-            ValidateEveryNSteps(val_every, int(cfg.train.get("val_max_batches", 32)), val_loader)
-        )
+    val_max_batches = int(cfg.train.get("val_max_batches", 32))
 
     if cfg.stage == "rl":
         warmup_steps = int(cfg.get("imagination", {}).get("policy_warmup_steps", 0))
@@ -144,8 +139,9 @@ def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool, val_loader: Dat
         precision=cfg.train.precision,
         gradient_clip_val=cfg.train.get("grad_clip"),
         log_every_n_steps=cfg.log.every_n_steps,
-        check_val_every_n_epoch=0 if step_val else 1,
-        limit_val_batches=limit_val_batches,
+        val_check_interval=val_every if step_val else 1.0,
+        check_val_every_n_epoch=None if step_val else 1,
+        limit_val_batches=val_max_batches if has_val else 0,
         default_root_dir=str(run_dir),
         callbacks=callbacks,
         logger=loggers,
@@ -176,7 +172,7 @@ def train(cfg: DictConfig) -> None:
     module_cls = STAGES[stage]
     module = module_cls(cfg)
     train_loader, val_loader = build_dataloaders(cfg)
-    trainer = build_trainer(cfg, run_dir, has_val=val_loader is not None, val_loader=val_loader)
+    trainer = build_trainer(cfg, run_dir, has_val=val_loader is not None)
     ckpt_path = _resolve_resume_ckpt(cfg)
     trainer.fit(
         module,

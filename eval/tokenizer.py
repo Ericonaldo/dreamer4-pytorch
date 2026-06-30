@@ -25,13 +25,11 @@ from omegaconf import DictConfig
 
 from dreamer4.checkpoint import load_state
 from dreamer4.config import load_config
-from dreamer4.data import (
-    GranularEpisodeDataset,
-    collate_episodes,
+from dreamer4.data import GranularEpisodeDataset, collate_episodes, split_episode_indices
+from eval.data_stats import (
     episode_cumulative_returns,
     reward_band_counts,
     select_episodes_by_return,
-    split_episode_indices,
 )
 from dreamer4.models import build_tokenizer
 from dreamer4.models.tokenizer import tokenizer_forward_with_aux

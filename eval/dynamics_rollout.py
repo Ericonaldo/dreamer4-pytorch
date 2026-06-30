@@ -75,11 +75,12 @@ from dreamer4.data import (
     GranularEpisodeDataset,
     align_dynamics_batch,
     collate_episodes,
+    split_episode_indices,
+)
+from eval.data_stats import (
     episode_cumulative_returns,
     reward_band_counts,
     select_episodes_by_return,
-    split_episode_indices,
-    transition_window_offset,
 )
 from dreamer4.models import DynamicsModel, build_tokenizer
 from eval.common import DEFAULT_REWARD_BANDS, episode_filter_for_split
@@ -109,9 +110,10 @@ def _load_rollout_batch_from_picked(
     items = []
     picked_meta = []
     for ep_idx, ret in picked:
-        offset = transition_window_offset(
-            ds.episode_length(ep_idx), effective_seq_len, position="middle"
-        )
+        ep_len = ds.episode_length(ep_idx)
+        if ep_len <= effective_seq_len:
+            raise ValueError(f"episode length {ep_len} must exceed seq_len {effective_seq_len}")
+        offset = (ep_len - effective_seq_len) // 2
         items.append(ds.get_transition_window(ep_idx, offset))
         picked_meta.append({"episode_idx": ep_idx, "return": ret, "offset": offset})
 

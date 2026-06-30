@@ -26,11 +26,8 @@ import torch
 from omegaconf import DictConfig
 
 from dreamer4.config import load_config
-from dreamer4.data import (
-    align_dynamics_batch,
-    episode_cumulative_returns,
-    select_episodes_by_return,
-)
+from dreamer4.data import align_dynamics_batch
+from eval.data_stats import episode_cumulative_returns, select_episodes_by_return
 from eval.dynamics_rollout import _load_rollout_batch_from_picked
 from dreamer4.models.dynamics import (
     decode_packed_to_images,

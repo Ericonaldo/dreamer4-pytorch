@@ -302,13 +302,17 @@ class RLModule(BaseModule):
 
         for key, value in metrics.items():
             prog = stage == "train" and key in ("val_loss", "pi_loss", "mean_td_return")
-            # Manual validation in ValidateEveryNSteps is outside trainer.validate(); sync_dist can DDP-deadlock.
             self.log(f"{prefix}/{key}", value, prog_bar=prog, sync_dist=stage == "train")
         if stage == "val":
             self.log("val/loss", loss, sync_dist=False)
         return loss
 
     def validation_step(self, batch, batch_idx):
+        if (
+            self.policy_warmup_steps > 0
+            and int(self.trainer.global_step) == self.policy_warmup_steps
+        ):
+            return None
         return self._shared_step(batch, "val")
 
     def on_train_batch_end(self, *_) -> None:

@@ -78,8 +78,6 @@ class BaseModule(L.LightningModule):
 
     def _num_val_batches(self) -> int:
         limit = int(self.cfg.train.get("val_max_batches", 32))
-        if getattr(self, "_val_n_batches", None) is not None:
-            return self._val_n_batches
         loader = self.trainer.val_dataloaders
         if loader is None:
             return max(1, limit)

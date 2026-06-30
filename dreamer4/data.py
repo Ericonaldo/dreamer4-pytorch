@@ -1,3 +1,5 @@
+"""Granular episode dataset and batch utilities for Dreamer4 training."""
+
 from __future__ import annotations
 
 import os
@@ -8,11 +10,13 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-CHUNK_SIZE = 100
+CHUNK_SIZE = 100  # Granular shard size; global step i lives in chunk i // CHUNK_SIZE.
 
 
 @dataclass
 class Batch:
+    """Batched episode windows from ``collate_episodes`` (B, T, ...)."""
+
     image: torch.Tensor | None
     proprio: torch.Tensor | None
     action: torch.Tensor
@@ -24,6 +28,7 @@ class Batch:
 
 
 def collate_episodes(items: list[dict[str, Any]]) -> Batch:
+    """Stack per-sample dicts from ``GranularEpisodeDataset`` into a training batch."""
     def stack(key: str) -> torch.Tensor:
         return torch.stack([item[key] for item in items])
 
@@ -73,7 +78,7 @@ def align_dynamics_batch(
 
 
 def _proprio_vector(data: dict[str, Any]) -> np.ndarray:
-    """orientations (14) + height (1) + velocity (9) = 24; or precomputed vector."""
+    """Build 24-d proprio from raw fields or a precomputed ``vector`` column."""
     if "vector" in data:
         return np.asarray(data["vector"])
     orient = np.asarray(data["orientations"])
@@ -89,7 +94,7 @@ def split_episode_indices(
     val_fraction: float,
     seed: int,
 ) -> tuple[list[int], list[int]]:
-    """Episode-level train/val split (indices into discovered episodes)."""
+    """Shuffle episode indices and split into train / val lists for ``episode_indices``."""
     if n_episodes < 2:
         raise ValueError(f"Need at least 2 episodes for train/val split, got {n_episodes}")
     rng = np.random.default_rng(seed)
@@ -101,89 +106,8 @@ def split_episode_indices(
     return train_idx, val_idx
 
 
-def episode_cumulative_returns(path: str) -> tuple[list[tuple[int, int]], np.ndarray]:
-    """Discover episodes and return per-episode sum of `reward` over inclusive [start, end]."""
-    reader = _open_granular_reader(path)
-    n_chunks = len(reader)
-    episodes = _discover_episodes(reader, n_chunks, CHUNK_SIZE)
-    cache = _ChunkCache(reader)
-    returns = np.zeros(len(episodes), dtype=np.float64)
-    for ep_idx, (gs, ge) in enumerate(episodes):
-        rew = _slice_global(cache, gs, ge - gs + 1, CHUNK_SIZE)["reward"]
-        returns[ep_idx] = float(np.sum(rew))
-    reader.close()
-    return episodes, returns
-
-
-def select_episodes_by_return(
-    returns: np.ndarray,
-    min_return: float,
-    *,
-    episode_indices: set[int] | None = None,
-    top_k: int | None = None,
-    max_return: float | None = None,
-) -> list[tuple[int, float]]:
-    """Return [(ep_idx, return)]; with max_return uses [min_return, max_return)."""
-    candidates: list[tuple[int, float]] = []
-    for ep_idx, ret in enumerate(returns):
-        if episode_indices is not None and ep_idx not in episode_indices:
-            continue
-        r = float(ret)
-        if r < min_return:
-            continue
-        if max_return is not None and r >= max_return:
-            continue
-        candidates.append((ep_idx, r))
-    if max_return is None:
-        candidates.sort(key=lambda x: x[1], reverse=True)
-    else:
-        mid = (min_return + max_return) / 2.0
-        candidates.sort(key=lambda x: abs(x[1] - mid))
-    if top_k is not None:
-        candidates = candidates[:top_k]
-    return candidates
-
-
-def reward_band_counts(returns: np.ndarray, bands: list[tuple[str, float, float]]) -> list[dict]:
-    """Population counts per band [low, high)."""
-    out = []
-    for name, low, high in bands:
-        mask = (returns >= low) & (returns < high)
-        band_rets = returns[mask]
-        out.append(
-            {
-                "name": name,
-                "low": low,
-                "high": high,
-                "count": int(mask.sum()),
-                "return_mean": float(band_rets.mean()) if len(band_rets) else None,
-                "return_min": float(band_rets.min()) if len(band_rets) else None,
-                "return_max": float(band_rets.max()) if len(band_rets) else None,
-            }
-        )
-    return out
-
-
-def transition_window_offset(ep_len: int, seq_len: int, *, position: str = "middle") -> int:
-    """In-episode offset for a transition window (0 .. ep_len - seq_len - 1)."""
-    if ep_len <= seq_len:
-        raise ValueError(f"episode length {ep_len} must exceed seq_len {seq_len}")
-    n_starts = ep_len - seq_len
-    if position == "start":
-        return 0
-    if position == "middle":
-        return n_starts // 2
-    raise ValueError(f"unknown position {position!r}")
-
-
-def _open_granular_reader(path: str):
-    import granular
-
-    return granular.ShardedDatasetReader(path, granular.decoders)
-
-
 def _discover_episodes(reader, n_chunks: int, chunk_size: int = CHUNK_SIZE) -> list[tuple[int, int]]:
-    """Return inclusive global step ranges (start, end) for each complete episode."""
+    """Scan ``is_first`` / ``is_last`` flags and return inclusive global (start, end) per episode."""
     events: list[tuple[int, str]] = []
     for i in range(n_chunks):
         elem = reader[i, ("length", "data")]
@@ -215,7 +139,7 @@ def _build_valid_starts(
     window_mode: str,
     episode_indices: set[int] | None,
 ) -> list[tuple[int, int]]:
-    """List of (episode_idx, global_start) for every in-episode window."""
+    """Enumerate every valid in-episode window as ``(episode_idx, global_start)``."""
     valid: list[tuple[int, int]] = []
     transition = window_mode == "transition"
     for ep_idx, (gs, ge) in enumerate(episodes):
@@ -236,12 +160,15 @@ def _build_valid_starts(
 
 
 class _ChunkCache:
+    """One-chunk LRU over a Granular reader; avoids re-reading the same shard per window."""
+
     def __init__(self, reader):
         self.reader = reader
         self._idx: int | None = None
         self._data: dict[str, Any] | None = None
 
     def get(self, chunk_idx: int) -> dict[str, Any]:
+        """Return decoded ``data`` dict for ``chunk_idx``, reusing the cached chunk when possible."""
         if self._idx != chunk_idx:
             self._data = self.reader[chunk_idx, ("data",)]["data"]
             self._idx = chunk_idx
@@ -255,7 +182,7 @@ def _slice_global(
     length: int,
     chunk_size: int = CHUNK_SIZE,
 ) -> dict[str, np.ndarray]:
-    """Read `length` contiguous steps from the global timeline."""
+    """Read ``length`` contiguous global steps, stitching across chunk boundaries."""
     parts: dict[str, list[np.ndarray]] = {}
     pos = global_start
     remaining = length
@@ -304,6 +231,7 @@ class GranularEpisodeDataset(Dataset):
         *,
         indices: list[int] | None = None,
     ):
+        """Open the dataset once to discover episodes and precompute valid window starts."""
         if indices is not None:
             if episode_indices is not None:
                 raise ValueError("Pass episode_indices or legacy indices, not both")
@@ -322,7 +250,9 @@ class GranularEpisodeDataset(Dataset):
         self._cache: _ChunkCache | None = None
         self._reader_pid: int | None = None
 
-        reader = _open_granular_reader(path)
+        import granular
+
+        reader = granular.ShardedDatasetReader(path, granular.decoders)
         try:
             n_chunks = len(reader)
             self.episodes = _discover_episodes(reader, n_chunks, self.chunk_size)
@@ -349,15 +279,18 @@ class GranularEpisodeDataset(Dataset):
 
     @property
     def num_episodes(self) -> int:
+        """Number of complete episodes discovered in the Granular dataset."""
         return len(self.episodes)
 
     def _ensure_reader(self) -> _ChunkCache:
         """Open a Granular reader in the current process (fork-safe for DataLoader workers)."""
+        import granular
+
         pid = os.getpid()
         if self._reader is None or self._reader_pid != pid:
             if self._reader is not None:
                 self._reader.close()
-            self._reader = _open_granular_reader(self.path)
+            self._reader = granular.ShardedDatasetReader(self.path, granular.decoders)
             self._cache = _ChunkCache(self._reader)
             self._reader_pid = pid
         assert self._cache is not None
@@ -372,14 +305,16 @@ class GranularEpisodeDataset(Dataset):
         self._reader_pid = None
 
     def __len__(self) -> int:
+        """Number of valid in-episode windows (dataset size for DataLoader)."""
         return len(self.valid)
 
     def episode_length(self, ep_idx: int) -> int:
+        """Return step count for episode ``ep_idx`` (inclusive of terminal step)."""
         gs, ge = self.episodes[ep_idx]
         return ge - gs + 1
 
     def get_transition_window(self, ep_idx: int, offset: int) -> dict[str, Any]:
-        """Load transition window at in-episode offset (same layout as __getitem__)."""
+        """Load one transition window by episode and in-episode offset (eval helper)."""
         if self.window_mode != "transition":
             raise ValueError("get_transition_window requires window_mode=transition")
         gs, _ = self.episodes[ep_idx]
@@ -389,27 +324,20 @@ class GranularEpisodeDataset(Dataset):
                 return self.__getitem__(i)
         raise KeyError(f"no transition window for episode {ep_idx} offset {offset}")
 
-    def _window_bounds(self, global_start: int) -> tuple[int, int, int, int, int, int]:
-        """Return obs_start, obs_len, act_start, act_len, rew_start, rew_len in global coords."""
-        if self.window_mode == "transition":
-            obs_len = self.seq_len + 1
-            act_len = self.seq_len
-            return global_start, obs_len, global_start, act_len, global_start + 1, act_len
-        n = self.seq_len
-        return global_start, n, global_start, n, global_start, n
-
     def __getitem__(self, index: int) -> dict[str, Any]:
+        """Return one window dict: tensors for image/proprio/action/reward and episode flags."""
         cache = self._ensure_reader()
         _, global_start = self.valid[index]
-        obs_start, obs_len, act_start, act_len, rew_start, rew_len = self._window_bounds(global_start)
 
-        obs_data = _slice_global(cache, obs_start, obs_len, self.chunk_size)
         if self.window_mode == "transition":
-            act_data = _slice_global(cache, act_start, act_len, self.chunk_size)
-            rew_data = _slice_global(cache, rew_start, rew_len, self.chunk_size)
+            obs_data = _slice_global(cache, global_start, self.seq_len + 1, self.chunk_size)
+            act_data = _slice_global(cache, global_start, self.seq_len, self.chunk_size)
+            rew_data = _slice_global(cache, global_start + 1, self.seq_len, self.chunk_size)
+            act_len = self.seq_len
         else:
-            act_data = obs_data
-            rew_data = obs_data
+            obs_data = _slice_global(cache, global_start, self.seq_len, self.chunk_size)
+            act_data = rew_data = obs_data
+            act_len = self.seq_len
 
         image = proprio = None
         if self.obs_mode in ("image", "both"):
