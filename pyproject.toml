@@ -5,8 +5,10 @@ description = "Minimal PyTorch Lightning implementation of Dreamer 4"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "dm-control>=1.0.14",
     "granular",
     "imageio>=2.37.0",
+    "imageio-ffmpeg>=0.5.0",
     "lightning>=2.4.0",
     "numpy>=1.26.0",
     "omegaconf>=2.3.0",
@@ -17,10 +19,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff>=0.8.0"]
-dmc = [
-    "dm-control>=1.0.14",
-    "imageio-ffmpeg>=0.5.0",
-]
 
 [dependency-groups]
 dev = ["ruff>=0.8.0"]

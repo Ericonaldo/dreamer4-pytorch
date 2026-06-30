@@ -477,11 +477,13 @@ def run_policy_episode(
     env = make_eval_env(cfg)
 
     if model_state is not None or tokenizer_state is not None:
+        # Training async eval: weights from in-memory state dicts (current RL/BC step).
         model, tokenizer = load_policy_modules(
             cfg, device, model_state=model_state, tokenizer_state=tokenizer_state
         )
         policy = DreamerAgent(cfg, device, model=model, tokenizer=tokenizer)
     else:
+        # Offline CLI eval: DreamerAgent loads from cfg.bc_ckpt / cfg.tokenizer_ckpt.
         policy = DreamerAgent(cfg, device)
 
     policy.reset()
