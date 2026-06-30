@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping, Optional, Tuple
 
 import torch
@@ -31,35 +32,181 @@ def unpack_spatial_to_bottleneck(z_btsd: torch.Tensor, k: int) -> torch.Tensor:
     return z_btsd.view(B, T, S * k, D)
 
 
+def _is_pow2(n: int) -> bool:
+    return n > 0 and (n & (n - 1)) == 0
+
+
+def _emax_from_kmax(k_max: int) -> int:
+    emax = int(round(math.log2(k_max)))
+    assert (1 << emax) == k_max, "k_max must be a power of two"
+    return emax
+
+
+def _sample_step_excluding_dmin(
+    device: torch.device, B: int, T: int, k_max: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample coarser shortcut step sizes (excludes finest d_min)."""
+    emax = _emax_from_kmax(k_max)
+    step_idx = torch.randint(low=0, high=max(1, emax), size=(B, T), device=device, dtype=torch.long)
+    d = 1.0 / (1 << step_idx).to(torch.float32)
+    return d, step_idx
+
+
+def _sample_tau_for_step(
+    device: torch.device, B: int, T: int, k_max: int, step_idx: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample signal level tau and discrete signal index on the flow grid for step_idx."""
+    K = (1 << step_idx).to(torch.long)
+    u = torch.rand((B, T), device=device, dtype=torch.float32)
+    j_idx = torch.floor(u * K.to(torch.float32)).to(torch.long)
+    tau = j_idx.to(torch.float32) / K.to(torch.float32)
+    scale = torch.div(torch.tensor(k_max, device=device), K, rounding_mode="floor")
+    tau_idx = j_idx * scale
+    return tau, tau_idx
+
+
+def make_tau_schedule(*, k_max: int, flow_steps: int) -> dict[str, Any]:
+    """
+    Integration grid for one generated frame.
+    flow_steps is the number of forward passes (K); must divide k_max evenly.
+    """
+    assert _is_pow2(k_max), "k_max must be a power of two"
+    K = int(flow_steps)
+    assert K > 0 and k_max % K == 0, f"k_max={k_max} must be divisible by flow_steps={K}"
+    e = int(round(math.log2(K)))
+    assert (1 << e) == K, "flow_steps must be a power of two"
+    scale = k_max // K
+    tau = [i / K for i in range(K)] + [1.0]
+    tau_idx = [i * scale for i in range(K)] + [k_max]
+    return dict(K=K, e=e, scale=scale, tau=tau, tau_idx=tau_idx, dt=1.0 / K)
+
+
+def shortcut_forcing_loss(
+    model: nn.Module,
+    z1: torch.Tensor,
+    actions: torch.Tensor,
+    *,
+    k_max: int,
+    B_self: int = 0,
+    global_step: int = 0,
+    bootstrap_start: int = 0,
+    space_mode: Optional[str] = None,
+) -> Tuple[torch.Tensor, dict[str, float]]:
+    """
+    Paper-style dynamics pretrain loss: finest-step flow matching + bootstrap self-consistency.
+
+    First B - B_self rows use d_min (flow branch); last B_self rows use coarser steps (bootstrap).
+    """
+    device = z1.device
+    B, T = z1.shape[:2]
+    B_self = max(0, min(int(B_self), B - 1))
+    B_emp = B - B_self
+    emax = _emax_from_kmax(k_max)
+
+    step_idx_emp = torch.full((B_emp, T), emax, device=device, dtype=torch.long)
+    d_self = torch.zeros((0, T), device=device, dtype=torch.float32)
+    step_idx_self = torch.zeros((0, T), device=device, dtype=torch.long)
+    if B_self > 0:
+        d_self, step_idx_self = _sample_step_excluding_dmin(device, B_self, T, k_max)
+        step_idx_full = torch.cat([step_idx_emp, step_idx_self], dim=0)
+    else:
+        step_idx_full = step_idx_emp
+
+    sigma_full, sigma_idx_full = _sample_tau_for_step(device, B, T, k_max, step_idx_full)
+    sigma_emp = sigma_full[:B_emp]
+    sigma_self = sigma_full[B_emp:]
+    sigma_idx_self = sigma_idx_full[B_emp:]
+
+    z0_full = torch.randn_like(z1)
+    z_tilde_full = (1.0 - sigma_full)[..., None, None] * z0_full + sigma_full[..., None, None] * z1
+    z_tilde_self = z_tilde_full[B_emp:]
+
+    w_emp = 0.9 * sigma_emp + 0.1
+    w_self = 0.9 * sigma_self + 0.1
+
+    z1_hat_full, _ = model(
+        actions, step_idx_full, sigma_idx_full, z_tilde_full, space_mode=space_mode
+    )
+    z1_hat_emp = z1_hat_full[:B_emp]
+    z1_hat_self = z1_hat_full[B_emp:]
+
+    flow_per = (z1_hat_emp.float() - z1[:B_emp].float()).pow(2).mean(dim=(2, 3))
+    loss_emp = (flow_per * w_emp).mean()
+
+    boot_mse = torch.zeros((), device=device, dtype=torch.float32)
+    loss_self = torch.zeros((), device=device, dtype=torch.float32)
+
+    if B_self > 0 and global_step >= bootstrap_start:
+        d_half = d_self / 2.0
+        step_idx_half = step_idx_self + 1
+        sigma_plus = sigma_self + d_half
+        sigma_idx_plus = sigma_idx_self + (k_max * d_half).to(torch.long)
+
+        actions_self = actions[B_emp:]
+        z1_hat_half1, _ = model(
+            actions_self, step_idx_half, sigma_idx_self, z_tilde_self, space_mode=space_mode
+        )
+        b_prime = (z1_hat_half1.float() - z_tilde_self.float()) / (
+            1.0 - sigma_self
+        ).clamp_min(1e-6)[..., None, None]
+        z_prime = z_tilde_self.float() + b_prime * d_half[..., None, None]
+
+        z1_hat_half2, _ = model(
+            actions_self,
+            step_idx_half,
+            sigma_idx_plus,
+            z_prime.to(z_tilde_self.dtype),
+            space_mode=space_mode,
+        )
+        b_doubleprime = (z1_hat_half2.float() - z_prime.float()) / (
+            1.0 - sigma_plus
+        ).clamp_min(1e-6)[..., None, None]
+
+        vhat = (z1_hat_self.float() - z_tilde_self.float()) / (
+            1.0 - sigma_self
+        ).clamp_min(1e-6)[..., None, None]
+        v_target = ((b_prime + b_doubleprime) / 2.0).detach()
+
+        boot_per = (1.0 - sigma_self).pow(2) * (vhat - v_target).pow(2).mean(dim=(2, 3))
+        loss_self = (boot_per * w_self).mean()
+        boot_mse = boot_per.mean()
+
+    loss = ((loss_emp * B_emp) + (loss_self * B_self)) / B
+    metrics = {
+        "flow_mse": float(flow_per.mean().detach()),
+        "bootstrap_mse": float(boot_mse.detach()),
+        "loss_emp": float(loss_emp.detach()),
+        "loss_self": float(loss_self.detach()),
+        "sigma_mean": float(sigma_full.mean().detach()),
+    }
+    return loss, metrics
+
+
 def flow_matching_loss(
     model: nn.Module,
     z1: torch.Tensor,
     actions: torch.Tensor,
     *,
+    k_max: int | None = None,
     space_mode: Optional[str] = None,
 ) -> Tuple[torch.Tensor, dict[str, float]]:
-    """
-    Simple flow matching on packed latents: corrupt with noise level sigma, predict clean z1.
-    z_tilde = (1-sigma)*z0 + sigma*z1, target z1_hat ~= z1, weight (0.9*sigma + 0.1).
-    """
-    B, T = z1.shape[:2]
-    device = z1.device
-    sigma = torch.rand((B, T), device=device, dtype=torch.float32)
-    z0 = torch.randn_like(z1)
-    z_tilde = (1.0 - sigma)[..., None, None] * z0 + sigma[..., None, None] * z1
-    z1_hat, _ = model(actions, sigma, z_tilde, space_mode=space_mode)
-    flow_per = (z1_hat.float() - z1.float()).pow(2).mean(dim=(2, 3))
-    weight = 0.9 * sigma + 0.1
-    loss = (flow_per * weight).mean()
-    metrics = {
-        "flow_mse": float(flow_per.mean().detach()),
-        "sigma_mean": float(sigma.mean().detach()),
-    }
-    return loss, metrics
+    """Finest-step shortcut loss only (no bootstrap)."""
+    if k_max is None:
+        k_max = int(getattr(model, "k_max"))
+    return shortcut_forcing_loss(
+        model,
+        z1,
+        actions,
+        k_max=k_max,
+        B_self=0,
+        global_step=0,
+        bootstrap_start=0,
+        space_mode=space_mode,
+    )
 
 
 class DynamicsModel(nn.Module):
-    """Action-conditioned flow model on packed tokenizer latents (no shortcut forcing)."""
+    """Action-conditioned shortcut flow model on packed tokenizer latents."""
 
     def __init__(
         self,
@@ -77,8 +224,6 @@ class DynamicsModel(nn.Module):
         self.dropout = float(raw.get("dropout", 0.0))
         self.time_every = int(raw.get("time_every", 4))
         self.scale_pos_embeds = bool(raw.get("scale_pos_embeds", True))
-        # space_modes: masks registered on the transformer; space_mode: default when forward() omits it
-        # (flow rollout / sample_one_timestep_packed never pass space_mode — they use space_mode).
         space_modes_raw = raw.get("space_modes")
         if space_modes_raw is not None:
             self.space_modes = tuple(str(m) for m in space_modes_raw)
@@ -95,6 +240,11 @@ class DynamicsModel(nn.Module):
         self.n_agent = int(raw.get("n_agent", 1))
         self.action_dim = int(raw.get("action_dim", 6))
 
+        self.k_max = int(raw.get("k_max", 64))
+        assert _is_pow2(self.k_max), f"k_max must be a power of two, got {self.k_max}"
+        self.emax = _emax_from_kmax(self.k_max)
+        self.num_step_bins = self.emax + 1
+
         assert n_latents % self.packing_factor == 0
         self.n_spatial = n_latents // self.packing_factor
         self.d_spatial = latent_dim * self.packing_factor
@@ -110,15 +260,13 @@ class DynamicsModel(nn.Module):
             nn.Linear(action_hidden, self.d_model),
         )
 
-        self.noise_mlp = nn.Sequential(
-            nn.Linear(1, self.d_model),
-            nn.SiLU(),
-            nn.Linear(self.d_model, self.d_model),
-        )
+        self.step_embed = nn.Embedding(self.num_step_bins, self.d_model)
+        self.signal_embed = nn.Embedding(self.k_max + 1, self.d_model)
 
         segments = [
             (Modality.ACTION, 1),
             (Modality.NOISE, 1),
+            (Modality.STEP, 1),
             (Modality.SPATIAL, self.n_spatial),
         ]
         if self.n_register > 0:
@@ -157,27 +305,41 @@ class DynamicsModel(nn.Module):
         nn.init.normal_(action_last.weight, std=1e-3)
         nn.init.zeros_(action_last.bias)
 
+        nn.init.normal_(self.step_embed.weight, std=0.02)
+        nn.init.normal_(self.signal_embed.weight, std=0.02)
+
         nn.init.zeros_(self.flow_head.weight)
         nn.init.zeros_(self.flow_head.bias)
+
+    def clean_conditioning(
+        self, batch_time: tuple[int, int], device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Step/signal indices for clean latents (BC inference)."""
+        B, T = batch_time
+        step_idx = torch.full((B, T), self.emax, device=device, dtype=torch.long)
+        signal_idx = torch.full((B, T), self.k_max, device=device, dtype=torch.long)
+        return step_idx, signal_idx
 
     def forward(
         self,
         actions: torch.Tensor,
-        sigma: torch.Tensor,
+        step_idx: torch.Tensor,
+        signal_idx: torch.Tensor,
         packed_z: torch.Tensor,
         agent_tokens: Optional[torch.Tensor] = None,
         *,
         space_mode: Optional[str] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Predict clean packed latents. sigma: (B,T) in [0,1]. Returns (x1_hat, h_t)."""
+        """Predict clean packed latents. Returns (x1_hat, h_t)."""
         B, T = packed_z.shape[:2]
         spatial_tokens = self.spatial_proj(packed_z)
         action_tokens = self.action_encoder(actions).unsqueeze(2) + self.action_base.view(
             1, 1, 1, -1
         )
-        noise_tokens = self.noise_mlp(sigma[..., None]).unsqueeze(2)
+        signal_tokens = self.signal_embed(signal_idx.to(torch.long)).unsqueeze(2)
+        step_tokens = self.step_embed(step_idx.to(torch.long)).unsqueeze(2)
 
-        tokens = [action_tokens, noise_tokens, spatial_tokens]
+        tokens = [action_tokens, signal_tokens, step_tokens, spatial_tokens]
         if self.n_register > 0:
             reg = self.register_tokens.view(1, 1, self.n_register, self.d_model).expand(B, T, -1, -1)
             tokens.append(reg)
@@ -206,22 +368,32 @@ def sample_one_timestep_packed(
     actions: torch.Tensor,
     flow_steps: int,
 ) -> torch.Tensor:
-    """Sample one packed latent frame conditioned on clean past latents and actions."""
+    """Sample one packed latent frame with K=flow_steps shortcut integration steps."""
     device = past_packed.device
     dtype = past_packed.dtype
     B, t = past_packed.shape[:2]
     n_spatial, d_spatial = past_packed.shape[2], past_packed.shape[3]
+    k_max = int(getattr(model, "k_max"))
+    emax = int(getattr(model, "emax"))
+    sched = make_tau_schedule(k_max=k_max, flow_steps=flow_steps)
+
+    K = int(sched["K"])
+    e = int(sched["e"])
+    tau = sched["tau"]
+    tau_idx = sched["tau_idx"]
+    dt = float(sched["dt"])
 
     z = torch.randn((B, 1, n_spatial, d_spatial), device=device, dtype=dtype)
-    dt = 1.0 / flow_steps
+    step_idxs = torch.full((B, t + 1), emax, device=device, dtype=torch.long)
+    step_idxs[:, -1] = e
+    signal_idxs = torch.full((B, t + 1), k_max, device=device, dtype=torch.long)
 
-    for i in range(flow_steps):
-        tau_i = i / flow_steps
+    for i in range(K):
+        signal_idxs[:, -1] = int(tau_idx[i])
         z_tilde = torch.cat([past_packed, z], dim=1)
-        sigma = torch.ones(B, t + 1, device=device, dtype=torch.float32)
-        sigma[:, -1] = tau_i
-        z1_hat, _ = model(actions[:, : t + 1], sigma, z_tilde)
+        z1_hat, _ = model(actions[:, : t + 1], step_idxs, signal_idxs, z_tilde)
         x1_hat = z1_hat[:, -1:]
+        tau_i = float(tau[i])
         denom = max(1e-4, 1.0 - tau_i)
         velocity = (x1_hat.float() - z.float()) / denom
         z = (z.float() + velocity * dt).to(dtype)

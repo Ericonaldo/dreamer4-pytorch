@@ -41,6 +41,7 @@ model:
     n_register: 4
     n_agent: 1
     action_dim: 6
+    k_max: 64  # finest flow grid; inference flow_steps must divide k_max
     space_modes: [wm_dynamics, wm_agent]  # flow uses wm_dynamics, BC uses wm_agent (auto)
     space_mode: wm_dynamics  # default for flow / rollout when space_mode omitted
   action_horizon: 8
@@ -60,11 +61,13 @@ train:
   val_every: 1000
   val_max_batches: 32
   flow_weight: 1.0
+  shortcut_self_fraction: 0.25
+  shortcut_bootstrap_start: 5000
   action_weight: 1.0
   reward_weight: 0.1
   rollout_ctx: 8
   rollout_horizon: 8
-  rollout_flow_steps: 10
+  rollout_flow_steps: 8
   devices: 8
   accelerator: gpu
   precision: bf16-mixed
