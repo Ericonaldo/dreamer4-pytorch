@@ -331,7 +331,7 @@ class RLModule(BaseModule):
             return
 
         eval_cfg = self.cfg.get("eval", {})
-        if not eval_cfg.get("env_eval", True):
+        if not eval_cfg.get("env_eval", False):
             return
 
         run_dir = Path(self.cfg.log.dir) / self.cfg.log.run_name

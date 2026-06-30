@@ -16,9 +16,9 @@ model:
   tokenizer:
     image_size: 64
     channels: 3
-    patch_size: 4
+    patch_size: 8
     n_latents: 16
-    embed_dim: 128
+    embed_dim: 64
     depth: 8
     num_heads: 4
     mlp_ratio: 2.0
@@ -30,8 +30,8 @@ model:
     mae_p_min: 0.0
     mae_p_max: 0.0
   dynamics:
-    embed_dim: 256
-    depth: 19
+    embed_dim: 128
+    depth: 16
     num_heads: 4
     mlp_ratio: 2.0
     dropout: 0.0
@@ -44,9 +44,9 @@ model:
     space_modes: [wm_dynamics, wm_agent]
     space_mode: wm_dynamics
   action_horizon: 8
-  policy_hidden: 512
-  reward_hidden: 512
-  value_hidden: 512
+  policy_hidden: 256
+  reward_hidden: 256
+  value_hidden: 256
   reward_bins: 255
   reward_symexp_span: 20.0
   reward_layers: 1
@@ -71,7 +71,7 @@ train:
   checkpoint_every: 1000
   checkpoint_keep_last: 5
   val_every: 500
-  val_max_batches: 8
+  val_max_batches: 32
   devices: 4
   accelerator: gpu
   precision: 32-true  # RL PMPO numerically sensitive; BC/dynamics use bf16-mixed

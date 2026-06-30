@@ -166,7 +166,7 @@ class BCDynamicsModule(BaseModule):
             )
 
         eval_cfg = self.cfg.get("eval", {})
-        if not eval_cfg.get("env_eval", True):
+        if not eval_cfg.get("env_eval", False):
             return
 
         step = int(self.trainer.global_step)
