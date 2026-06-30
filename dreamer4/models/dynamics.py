@@ -8,7 +8,6 @@ from omegaconf import DictConfig
 
 from dreamer4.config import config_to_dict
 
-from dreamer4.models.policy import ActionEncoder
 from dreamer4.models.tokenizer import encode_images, temporal_unpatchify
 from dreamer4.models.transformer_blocks import (
     BlockCausalTransformer,
@@ -102,9 +101,15 @@ class DynamicsModel(nn.Module):
 
         self.spatial_proj = nn.Linear(self.d_spatial, self.d_model)
         self.register_tokens = nn.Parameter(torch.empty(self.n_register, self.d_model))
-        nn.init.normal_(self.register_tokens, std=0.02)
 
-        self.action_encoder = ActionEncoder(self.d_model, self.action_dim)
+        self.action_base = nn.Parameter(torch.empty(self.d_model))
+        action_hidden = int(self.d_model * 2.0)
+        self.action_encoder = nn.Sequential(
+            nn.Linear(self.action_dim, action_hidden),
+            nn.SiLU(),
+            nn.Linear(action_hidden, self.d_model),
+        )
+
         self.noise_mlp = nn.Sequential(
             nn.Linear(1, self.d_model),
             nn.SiLU(),
@@ -140,6 +145,18 @@ class DynamicsModel(nn.Module):
         )
 
         self.flow_head = nn.Linear(self.d_model, self.d_spatial)
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        if self.n_register > 0:
+            nn.init.normal_(self.register_tokens, std=0.02)
+
+        nn.init.normal_(self.action_base, std=0.02)
+        action_last = self.action_encoder[2]
+        assert isinstance(action_last, nn.Linear)
+        nn.init.normal_(action_last.weight, std=1e-3)
+        nn.init.zeros_(action_last.bias)
+
         nn.init.zeros_(self.flow_head.weight)
         nn.init.zeros_(self.flow_head.bias)
 
@@ -155,7 +172,9 @@ class DynamicsModel(nn.Module):
         """Predict clean packed latents. sigma: (B,T) in [0,1]. Returns (x1_hat, h_t)."""
         B, T = packed_z.shape[:2]
         spatial_tokens = self.spatial_proj(packed_z)
-        action_tokens = self.action_encoder(actions)
+        action_tokens = self.action_encoder(actions).unsqueeze(2) + self.action_base.view(
+            1, 1, 1, -1
+        )
         noise_tokens = self.noise_mlp(sigma[..., None]).unsqueeze(2)
 
         tokens = [action_tokens, noise_tokens, spatial_tokens]

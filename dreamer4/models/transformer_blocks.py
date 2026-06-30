@@ -80,6 +80,9 @@ class MAEReplacer(nn.Module):
         self.p_min = float(p_min)
         self.p_max = float(p_max)
         self.mask_token = nn.Parameter(torch.empty(d_model))
+        self._init_weights()
+
+    def _init_weights(self) -> None:
         nn.init.normal_(self.mask_token, std=0.02)
 
     def forward(self, patches_btnd: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

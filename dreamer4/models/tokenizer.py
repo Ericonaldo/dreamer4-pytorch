@@ -110,6 +110,9 @@ class Encoder(nn.Module):
         self.mae = MAEReplacer(d_model=d_model, p_min=mae_p_min, p_max=mae_p_max)
 
         self.latents = nn.Parameter(torch.empty(n_latents, d_model))
+        self._init_weights()
+
+    def _init_weights(self) -> None:
         nn.init.normal_(self.latents, std=0.02)
 
     def forward(self, patch_tokens_btnd: torch.Tensor) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
@@ -152,7 +155,6 @@ class Decoder(nn.Module):
 
         self.up_proj = nn.Linear(d_bottleneck, d_model)
         self.patch_queries = nn.Parameter(torch.empty(n_patches, d_model))
-        nn.init.normal_(self.patch_queries, std=0.02)
         self.patch_head = nn.Linear(d_model, d_patch)
 
         layout = TokenLayout(n_latents=n_latents, segments=((Modality.IMAGE, n_patches),))
@@ -170,6 +172,10 @@ class Decoder(nn.Module):
             time_every=time_every,
             latents_only_time=latents_only_time,
         )
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        nn.init.normal_(self.patch_queries, std=0.02)
 
     def forward(self, z_btLd: torch.Tensor) -> torch.Tensor:
         B, T, L, _ = z_btLd.shape
