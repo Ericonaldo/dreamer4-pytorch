@@ -11,7 +11,7 @@ Three-stage pipeline (paper-aligned); configs under `configs/walker_walk/`:
 | Stage | Name | What trains | Config (this repo) |
 |-------|------|-------------|-------------------|
 | **1** | **Tokenizer** | Causal patch **encoder + decoder**; block-causal transformer with **MAE** random patch masking → latent bottleneck `z_t` + recon loss | `tokenizer.yaml` |
-| **2** | **Pretraining** | **BC + dynamics** on frozen tokenizer encode: joint **flow matching** (`wm_dynamics`) and **BC** action/reward MTP (`wm_agent`) on one backbone | `bc_dynamics.yaml` |
+| **2** | **Pretraining** | **BC + dynamics** on frozen tokenizer encode: joint **shortcut forcing** (`wm_dynamics`) and **BC** action/reward MTP (`wm_agent`) on one backbone | `bc_dynamics.yaml` |
 | **3** | **Posttraining** | **RL** in latent imagination: rollout with learned dynamics + policy, value head on TD(λ) returns (not BC MTP) | `policy_imagination_pmpo.yaml` |
 
 Stage 1 decoder is dropped at inference for downstream stages (encode-only). Stage 3 uses imagined trajectories, not dataset BC labels.
@@ -57,13 +57,14 @@ z_t  (B,T,L_z,D_z)
 
 **Dynamics** (`DynamicsModel.forward`):
 ```
-Per timestep t, build spatial token sequence (dim S = 2+S_sp+R+N = 15 by default):
+Per timestep t, build spatial token sequence (dim S = 3+S_sp+R+N = 16 by default):
 
-  x_t = [ a_t | σ_t | z̄_t | reg | agent_t ]   each slot → (D,)
-        (1)   (1)  (S_sp) (R)   (N)
+  x_t = [ a_t | τ_t | d_t | z̄_t | reg | agent_t ]   each slot → (D,)
+        (1)   (1)   (1)  (S_sp) (R)   (N)
 
   a_t:      actions (B,T,A) → ActionEncoder → (B,T,1,D)
-  σ_t:      flow noise level (B,T) → MLP → (B,T,1,D); 0 at BC inference
+  τ_t:      signal level index (B,T) → Embedding → (B,T,1,D)
+  d_t:      step size index (B,T) → Embedding → (B,T,1,D)
   z̄_t:      packed latents (B,T,S_sp,D_sp) → Linear → (B,T,S_sp,D)
   reg:      learned register (B,T,R,D)
   agent_t:  learned (B,T,N,D); flow uses wm_dynamics mask, BC uses wm_agent mask
@@ -88,23 +89,44 @@ Frozen tokenizer encode once → packed_z, action, reward.
 
 Two forwards per step, different space attention masks (space_modes: [wm_dynamics, wm_agent]):
 
-  1) flow (space_mode=wm_dynamics)
-     σ_t ~ Uniform(0,1) per (B,T); agent_t present but isolated (world ignores agent keys)
-     → flow head x̂₁ vs clean z̄_t
-     loss_flow = MSE(x̂₁, z̄_t)
+  1) shortcut flow (space_mode=wm_dynamics)
+     Sample step size d and signal level τ on discrete grid (k_max); corrupt z̄_t
+     → flow head x̂₁ vs clean z̄_t (finest step) + bootstrap self-consistency (coarser steps)
+     loss_flow = shortcut_forcing_loss (empirical + bootstrap branches, ramp weight w(τ)=0.9τ+0.1)
 
   2) BC (space_mode=wm_agent)
-     σ_t = 0; agent_t attends world (spatial/register/action/noise)
+     τ = clean, d = finest; agent_t attends world (spatial/register/action/signal/step)
      → h_t → AgentHeads → bc_loss (action NLL + reward twohot CE)
 
   loss = flow_weight · loss_flow + bc_loss
 ```
 
+### Shortcut model (dynamics)
+
+Paper-style [shortcut forcing](https://arxiv.org/abs/2509.24527): x-prediction on packed latents with discrete signal level **τ** and step size **d**. Implemented in `shortcut_forcing_loss` (`models/dynamics.py`); aligned with [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4) `dynamics_pretrain_loss`.
+
+**Training** (each batch, `space_mode=wm_dynamics`):
+
+| Branch | Rows | step `d` | Loss |
+|--------|------|----------|------|
+| Flow (empirical) | ~75% | finest `d_min = 1/k_max` | MSE(x̂₁, z̄) with ramp `w(τ)=0.9τ+0.1` |
+| Bootstrap (self) | ~25% after step 5000 | coarser `d ∈ {1/2, 1/4, …}` | large-step velocity vs avg of two half-step velocities (target detached) |
+
+τ and `d` are sampled on a power-of-two grid; `k_max` is the finest training grid (default **64**). Bootstrap starts at `train.shortcut_bootstrap_start` (default **5000**).
+
+**Inference** (rollout / imagination): generate each latent frame with **K forward passes** (paper default **K=4**). `flow_steps` must be a power of two and divide `k_max`.
+
+| Config key | Stage | Default |
+|------------|-------|---------|
+| `model.dynamics.k_max` | train + infer | `64` |
+| `train.rollout_flow_steps` | bc_dynamics val / `eval/dynamics_rollout.py` | `4` |
+| `imagination.flow_steps` | RL latent rollout | `4` |
+| `train.shortcut_self_fraction` | bootstrap row fraction | `0.25` |
+| `train.shortcut_bootstrap_start` | global step before bootstrap | `5000` |
+
+**Note:** shortcut checkpoints are **not compatible** with pre-shortcut `bc_dynamics` weights (`noise_mlp` → τ/d embeddings). Retrain stage 2 from a tokenizer ckpt.
+
 ## TODO
-
-### Shortcut model (dynamics pretrain)
-
-- [ ] **Shortcut forcing + bootstrap self-consistency** — replace plain flow MSE with paper-style `dynamics_pretrain_loss` (shortcut branch + self branch); discrete noise schedule / `k_max` grid (ref uses finest-step flow grid)
 
 ### Transformer (vs paper §architecture)
 
@@ -197,8 +219,8 @@ Hold-out via `data.val_fraction` (default 5%). Metrics: `val/loss_mae`, `val/los
 | Script | What | Checkpoint |
 |--------|------|------------|
 | `dreamer4-eval` (`eval/policy.py`) | Online DMC policy rollout | `--bc-ckpt` |
-| `eval/dynamics_rollout.py` | Open-loop dynamics on dataset actions | `--dynamics-ckpt` |
-| `eval/imagination.py` | RL policy latent imagination | `--rl-ckpt` |
+| `eval/dynamics_rollout.py` | Open-loop dynamics on dataset actions | `--dynamics-ckpt` (uses `train.rollout_flow_steps`, default 4) |
+| `eval/imagination.py` | RL policy latent imagination | `--rl-ckpt` (uses `imagination.flow_steps`, default 4) |
 
 Walker configs merge `policy_eval.yaml` under `dreamer4-eval`. See each CLI `--help` for panels, videos, episode filters, and `--gpus`.
 
