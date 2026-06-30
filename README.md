@@ -2,7 +2,7 @@
 
 Minimal PyTorch Lightning reimplementation of [Dreamer 4](https://arxiv.org/abs/2509.24527) for DMC Walker Walk.
 
-References: [Dreamer v4 Paper (arXiv)](https://arxiv.org/pdf/2509.24527), [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4)(only tokenzier + dynamics training), [edwhu/dreamer4-jax](https://github.com/edwhu/dreamer4-jax) (no imagine rl), [lucidrains/dreamer4](https://github.com/lucidrains/dreamer4).
+References: [Dreamer v4 Paper (arXiv)](https://arxiv.org/pdf/2509.24527), [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4)(only tokenizer + dynamics training), [edwhu/dreamer4-jax](https://github.com/edwhu/dreamer4-jax) (no imagine rl), [lucidrains/dreamer4](https://github.com/lucidrains/dreamer4).
 
 ## Training stages
 
@@ -102,6 +102,10 @@ Two forwards per step, different space attention masks (space_modes: [wm_dynamic
 
 ## TODO
 
+### Shortcut model (dynamics pretrain)
+
+- [ ] **Shortcut forcing + bootstrap self-consistency** — replace plain flow MSE with paper-style `dynamics_pretrain_loss` (shortcut branch + self branch); discrete noise schedule / `k_max` grid (ref uses finest-step flow grid)
+
 ### Transformer (vs paper §architecture)
 
 Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft capping*.
@@ -117,45 +121,6 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [ ] **RoPE** — apply rotary embeddings to Q/K in space & time attention (replace or pair with current sinusoidal token bias)
 - [ ] **QKNorm** — RMSNorm (or equivalent) on Q and K per head before dot product
 - [ ] **Attention logit soft capping** — e.g. `softcap * tanh(logits / softcap)` before softmax (tune cap hyperparameter)
-
-### Tokenizer
-
-- [x] Block-causal MAE encoder–decoder
-- [x] Train / val loop, step-based eval, reconstruction viz, wandb
-- [x] Multi-GPU DDP
-- [x] Latent temporal collapse — tune `embed_dim` / `latent_dim` (default configs: `embed_dim=64`, `latent_dim=32`, `patch_size=8`, `n_latents=16`; large 512-dim runs collapsed); monitor `tokenizer/z_temporal_std`
-- [x] Robust checkpoint pruning (`KeepLastCheckpoints` handles Lightning `-v1` suffixes, rank-0 only)
-- [x] Resume from Lightning checkpoint (`train.resume_ckpt`)
-- [x] Standalone tokenizer eval script (recon metrics + panels from checkpoint) — see `eval/tokenizer.py`
-- [ ] Ablation: `scale_pos_embeds` off (paper notes it can help)
-
-### Pretraining (stage 2 — BC + dynamics)
-
-- [x] `DynamicsModel` — action + noise-conditioned flow on packed tokenizer latents
-- [x] Simple flow-matching loss (empirical MSE on clean latents, no shortcut/bootstrap)
-- [x] `BCDynamicsModule` — joint flow + BC on shared backbone (`bc_dynamics.yaml`)
-- [ ] Shortcut forcing + bootstrap self-consistency loss (ref `dynamics_pretrain_loss` self branch); Discrete noise schedule / `k_max` grid (ref uses finest-step flow grid)
-- [x] Agent token slot — `n_agent=1`, learned `agent_tokens`, dual space masks (`wm_dynamics`, `wm_agent`)
-- [x] Action-conditioned rollout eval — dataset actions, autoregressive latent sampling, decode, `val/rollout_mse` / PSNR vs floor, wandb viz
-- [x] Standalone rollout eval script — panels, return-band sweeps, long mp4 rollouts (`eval/dynamics_rollout.py`)
-- [x] `PolicyModel` + `AgentHeads` — L-step action NLL + reward symexp twohot MTP (no value head in pretrain)
-- [ ] ~`TaskEmbedder` for multi-task BC — skipped for now: only Walker Walk is implemented, so a single learned `agent_tokens` parameter is enough and avoids an extra embedding table with no conditioning signal; add when training multiple tasks on shared weights~
-- [ ] **Reward MTP readout switch (config)** — selectable via YAML, not implemented yet:
-  - `symexp_twohot` (current): `SymExpTwoHotHead` + twohot CE; raw rewards from dataloader, **no norm**
-  - `mse`: simple MLP → scalar `(B,T,L)` + MSE on L-step future rewards; **normalize rewards in dataloader** (e.g. running mean/std or fixed scale in `data` / `train` config); denorm for metrics only
-  - Config sketch: `model.reward_head: symexp_twohot | mse`; when `mse`, add `data.reward_norm` (or `train.reward_norm`) for dataloader stats / clip range
-
-### Imagination RL (stage 3)
-
-- [x] `imagine_latent_rollout` in latent space (`modules/rl.py`)
-- [x] `RLModule` — imagination RL on top of BC (`modules/rl.py`); value head with TD(λ) return targets
-- [x] Config `configs/walker_walk/policy_imagination_pmpo.yaml`
-- [x] RL post-training stability: `init_value_head_from_reward_head`, policy warmup (value-only), `context_len_min`, `32-true` precision, PMPO log-prob recompute on fixed actions (see `analysis/imagination_rl.md`)
-
-### Data & infra
-
-- [ ] `data.obs_mode=proprio` / `both` paths through dynamics & policy (tokenizer is image-only today)
-- [x] DMC online env eval (`env.py` + `agent.py`; CLI `dreamer4-eval`, training `AsyncPolicyEval`)
 
 ## Setup
 
@@ -194,9 +159,9 @@ uv run dreamer4-train configs/walker_walk/tokenizer.yaml data.obs_mode=image log
 
 ### Multi-GPU (DDP)
 
-Lightning spawns workers when `train.devices > 1` (`strategy=ddp` in `train.py`). Run a **single** process; do not combine with `torchrun`.
+Lightning spawns workers when `train.devices > 1` (`ddp` for tokenizer; `ddp_find_unused_parameters_true` for `bc_dynamics` / `rl` in `train.py`). Run a **single** process; do not combine with `torchrun`.
 
-`train.batch_size` is **per GPU**. Global batch = `batch_size × devices` (default `16 × 8 = 128`).
+`train.batch_size` is **per GPU**. Global batch = `batch_size × devices` (e.g. `64 × 8 = 512` with default `tokenizer.yaml`).
 
 ```bash
 # 8 GPUs (local or server)
@@ -305,9 +270,11 @@ uv run python -m eval.dynamics_rollout configs/walker_walk/bc_dynamics.yaml \
   --by-reward-bands --split val
 ```
 
-### BC policy eval (online DMC)
+### Online policy eval (DMC)
 
-CLI: `dreamer4-eval` (`eval/policy.py`) — thin wrapper over `dreamer4/agent.py` and `dreamer4/eval_utils.py` (`DreamerAgent`, `run_policy_env_eval`, `AsyncPolicyEval`). When the training YAML lives in `configs/walker_walk/`, merges `policy_eval.yaml` underneath it for heavier offline eval defaults (`episodes: 50`, `num_envs: 8`; training yaml `eval.episodes` is typically smaller). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan + forward every env step); **L>1** = forward once then execute MTP slots `1..L` without re-forwarding, but still **encode every env frame** and commit actions into `(z, a)` history (capped by `model.action_horizon - 1`). Regenerate horizon sweep charts with `python -m dreamer4.plot_action_horizon_eval`.
+CLI: `dreamer4-eval` (`eval/policy.py`) — thin wrapper over `dreamer4/agent.py` and `dreamer4/eval_utils.py` (`DreamerAgent`, `run_policy_env_eval`, `AsyncPolicyEval`). Loads weights from `--bc-ckpt` / `cfg.bc_ckpt` (BC or post-RL checkpoints share the same `PolicyModel` arch). **No `--rl-ckpt` flag yet** — RL env metrics during training come from async eval with in-memory weights; offline RL-only eval uses `eval/imagination.py` (latent rollout videos) or pass an RL checkpoint path via config override once supported.
+
+When the training YAML lives in `configs/walker_walk/`, merges `policy_eval.yaml` underneath it for heavier offline eval defaults (`episodes: 50`, `num_envs: 8`; training yaml `eval.episodes` is typically smaller). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan + forward every env step); **L>1** = forward once then execute MTP slots `1..L` without re-forwarding, but still **encode every env frame** and commit actions into `(z, a)` history (capped by `model.action_horizon - 1`).
 
 **Multi-GPU**: `--gpus 8` splits 50 episodes across 8 GPUs; each GPU runs `eval.num_envs` parallel envs (8 in `policy_eval.yaml`).
 
@@ -357,13 +324,24 @@ uv run python -m eval.dynamics_rollout $CFG \
 
 Outputs: `videos/rollout_video_ep*_ret*.mp4` (predicted frames) and `videos/rollout_video_ep*_ret*_gt_pred.mp4` (GT over pred), plus `video_metrics.json`.
 
+### Imagination rollout videos (RL policy)
+
+Script: `eval/imagination.py`. Picks dataset episodes by cumulative return, encodes a context window (suffix-style, matching RL training), rolls out **policy-sampled** actions in latent space, decodes frames, and writes mp4s. Uses `--rl-ckpt` (not `dreamer4-eval`).
+
+```bash
+uv run python -m eval.imagination configs/walker_walk/policy_imagination_pmpo.yaml \
+  --rl-ckpt logs/walker_walk/rl_pmpo/checkpoints/step-step=7000.ckpt \
+  --out-dir logs/walker_walk/rl_pmpo/imagine_videos_step7000 \
+  --min-episode-return 900 --max-items 1
+```
+
 ## Observation modes
 
 Set `data.obs_mode` in config:
 
-- `image` — pixels only (tokenizer training)
-- `proprio` — proprioception only
-- `both` — image + proprioception
+- `image` — pixels only (tokenizer training; required for dynamics / policy today)
+- `proprio` — proprioception only (loaded by `GranularEpisodeDataset`; not wired through tokenizer / dynamics training)
+- `both` — image + proprioception (same limitation as `proprio` for stages 2–3)
 
 ## Project layout
 
@@ -389,10 +367,11 @@ dreamer4/
   train.py            # Trainer, dataloaders, dreamer4-train entry
 eval/                 # Standalone eval scripts + viz
   common.py
+  data_stats.py       # Episode return / band helpers for eval scripts
   smoke_test.py       # Checkpoint compatibility baseline
   dynamics_rollout.py
   tokenizer.py
-  imagination.py
+  imagination.py      # RL policy latent rollout videos (--rl-ckpt)
   policy.py           # dreamer4-eval CLI
   viz/                # Panel / frame annotations
 configs/walker_walk/

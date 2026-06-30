@@ -219,7 +219,12 @@ class AsyncPolicyEval:
         loggers = getattr(trainer, "loggers", None) if trainer is not None else None
         if isinstance(loggers, (list, tuple)) and loggers:
             for logger in loggers:
-                logger.log_metrics(log_dict, step=step)
+                try:
+                    logger.log_metrics(log_dict, step=step)
+                except Exception as exc:
+                    rank_zero_warn(
+                        f"logger {type(logger).__name__} metrics skipped (@ step {step}): {exc}"
+                    )
         else:
             for key, value in metrics.items():
                 prog = key == "return_mean"
@@ -270,7 +275,12 @@ def log_dynamics_rollout_viz(
         if isinstance(logger, WandbLogger):
             import wandb
 
-            logger.experiment.log({log_key: wandb.Image(panel, caption=caption)}, step=step)
+            try:
+                logger.experiment.log({log_key: wandb.Image(panel, caption=caption)}, step=step)
+            except Exception as exc:
+                rank_zero_warn(
+                    f"logger {type(logger).__name__} image skipped (@ step {step}): {exc}"
+                )
 
 
 def log_recon_panel(
@@ -304,4 +314,11 @@ def log_recon_panel(
         if isinstance(logger, WandbLogger):
             import wandb
 
-            logger.experiment.log({"tokenizer/viz": wandb.Image(panel, caption=caption)}, step=step)
+            try:
+                logger.experiment.log(
+                    {"tokenizer/viz": wandb.Image(panel, caption=caption)}, step=step
+                )
+            except Exception as exc:
+                rank_zero_warn(
+                    f"logger {type(logger).__name__} image skipped (@ step {step}): {exc}"
+                )
