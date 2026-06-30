@@ -4,7 +4,7 @@ Writes per-split panels (target | masked | recon_masked | recon_full) and metric
 
 Example::
 
-    python -m eval.tokenizer configs/walker_walk/tokenizer_5m.yaml \\
+    python -m eval.tokenizer configs/walker_walk/tokenizer.yaml \\
       --tokenizer-ckpt logs/walker_walk/tokenizer_5m/checkpoints/step-step=20000.ckpt \\
       --out-dir analysis/tokenizer_5m_eval \\
       --splits train val \\
