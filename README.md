@@ -141,83 +141,35 @@ Place the dataset at `data/dmc_walker_walk/`.
 
 ## Training pipeline
 
-See **Training stages** above. Runnable configs:
-
-| Stage | Config | Notes |
-|-------|--------|-------|
-| 1 Tokenizer | `tokenizer.yaml` | MAE encoder–decoder |
-| 2 Pretraining | `bc_dynamics.yaml` | Joint flow + BC on one backbone |
-| 3 Posttraining | `policy_imagination_pmpo.yaml` | Imagination RL (PMPO) + async env eval |
+Run the three stages in order:
 
 ```bash
-# Full model
+# 1. Tokenizer
 uv run dreamer4-train configs/walker_walk/tokenizer.yaml
 
-# Override any config field
+# 2. BC + dynamics pretraining
+uv run dreamer4-train configs/walker_walk/bc_dynamics.yaml
+
+# 3. Imagination RL posttraining
+uv run dreamer4-train configs/walker_walk/policy_imagination_pmpo.yaml
+```
+
+Override any config field from the command line:
+
+```bash
 uv run dreamer4-train configs/walker_walk/tokenizer.yaml data.obs_mode=image log.wandb=true
 ```
 
-### Multi-GPU (DDP)
-
-Lightning spawns workers when `train.devices > 1` (`ddp` for tokenizer; `ddp_find_unused_parameters_true` for `bc_dynamics` / `rl` in `train.py`). Run a **single** process; do not combine with `torchrun`.
-
-`train.batch_size` is **per GPU**. Global batch = `batch_size × devices` (e.g. `64 × 8 = 512` with default `tokenizer.yaml`).
+For multi-GPU training, set `train.devices > 1`; Lightning uses DDP internally, so do not launch with torchrun:
 
 ```bash
-# 8 GPUs (local or server)
 uv run dreamer4-train configs/walker_walk/tokenizer.yaml \
   train.devices=8 \
   data.num_workers=4 \
   log.wandb=true
 ```
 
-Tune `train.batch_size` if OOM; scale `data.num_workers` per GPU (e.g. 2–4).
-
-### Imagination RL (PMPO)
-
-Stage `rl` on frozen tokenizer + dynamics + BC reward; trains value + policy in latent imagination. **Stability details (advantage bias, warmup, context, precision, PMPO log-prob):** see local `analysis/imagination_rl.md` (gitignored).
-
-We previously supported an optional PPO path but removed it: clipped PPO in latent imagination tended to explode easily (ratio blow-ups, unstable policy updates, env return collapse) despite stabilization attempts; this repo now trains PMPO only.
-
-**Prerequisites:** `tokenizer_ckpt` and `bc_ckpt` in the yaml (default: `bc_dynamics` run / `last.ckpt`). **Start from a bc_dynamics checkpoint, not a corrupted RL checkpoint.**
-
-**RL post-training stability (defaults in yaml + code):**
-
-| Measure | Config / code | Why |
-|---------|---------------|-----|
-| Value init from BC reward | `init_value_head_from_reward_head()` in `RLModule` | Avoids \(V(s)\approx 0\) while imagined returns are ~5–15 → advantages almost all positive → PMPO destroys BC |
-| Value / policy warmup | `imagination.policy_warmup_steps: 500` | First N steps train **value only** (`train_policy=False`, policy `lr=0`); saves `warmup_end.ckpt` for resume |
-| Bounded imagination context | `imagination.context_len_min: 8` (+ `data.seq_len: 16`) | Rollout context suffix sampled in `[context_len_min, seq_len]` (not from length 1); set `context_len_min == seq_len` for fixed context |
-| Full fp32 RL training | `train.precision: 32-true` | BC/dynamics use `bf16-mixed`; PMPO `exp` / `atanh` / `Normal` / KL are numerically sensitive in mixed precision |
-
-| Config | Default warmup | Notes |
-|--------|----------------|-------|
-| `policy_imagination_pmpo.yaml` | 500 steps | `policy_lr: 3e-5` |
-
-```bash
-# PMPO (Dreamer4 paper default)
-uv run dreamer4-train configs/walker_walk/policy_imagination_pmpo.yaml \
-  log.wandb=true
-
-# 8 GPUs (server; headless MuJoCo)
-MUJOCO_GL=egl CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-  uv run dreamer4-train configs/walker_walk/policy_imagination_pmpo.yaml \
-  train.devices=8 train.batch_size=64 \
-  log.run_name=walker_walk/rl_pmpo log.wandb=true
-
-# Smoke (1 GPU, no wandb)
-uv run dreamer4-train configs/walker_walk/policy_imagination_pmpo.yaml \
-  train.max_steps=100 train.devices=1 train.batch_size=32 \
-  train.val_every=100 log.wandb=false \
-  log.run_name=walker_walk/rl_pmpo_smoke eval.env_eval=false
-```
-
-`val/env_return_mean` from async env eval (`eval.env_eval: true`, every `train.val_every` steps). Override checkpoints:
-
-```bash
-uv run dreamer4-train configs/walker_walk/policy_imagination_pmpo.yaml \
-  bc_ckpt=logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt
-```
+`train.batch_size` is per GPU.
 
 ### Resume training
 
@@ -238,101 +190,27 @@ uv run dreamer4-train configs/walker_walk/tokenizer.yaml \
 
 ### Tokenizer validation
 
-Episode-level hold-out via `data.val_fraction` (default 5%). Metrics: `val/loss_mae` (masked MSE, same as train), `val/loss_full` (all-patch MSE, stable), and `val/z_temporal_std` (latent diversity across time; should stay well above ~1e-3). Reconstruction panels (`target | masked | recon_masked | recon_full`) go to `logs/<run_name>/viz/` and wandb (`tokenizer/viz`) when `log.wandb=true`. Tune `train.val_every`, `train.val_max_batches`, `log.viz_max_items`.
+Hold-out via `data.val_fraction` (default 5%). Metrics: `val/loss_mae`, `val/loss_full`, `val/z_temporal_std`.
 
-### Dynamics rollout eval (standalone)
+### Eval
 
-Script: `eval/dynamics_rollout.py`. Loads frozen tokenizer + dynamics checkpoint, replays **dataset actions** (open-loop) via `dreamer4.eval_utils.dynamics_rollout_eval` / `dynamics_rollout_video`, decodes latents, and compares to GT.
+| Script | What | Checkpoint |
+|--------|------|------------|
+| `dreamer4-eval` (`eval/policy.py`) | Online DMC policy rollout | `--bc-ckpt` |
+| `eval/dynamics_rollout.py` | Open-loop dynamics on dataset actions | `--dynamics-ckpt` |
+| `eval/imagination.py` | RL policy latent imagination | `--rl-ckpt` |
 
-**Panel eval** (default): autoregressive rollout with context lengths `ctx=1..rollout_ctx`; GT frames in context, predicted frames after. Outputs `rollout_panel_all.png`, `rollout_traj_{i:02d}.png`, and `metrics.json` (`rollout_mse`, `rollout_psnr`, repeat-last-frame floor). Horizon comes from `train.rollout_ctx`, `train.rollout_horizon`, `train.rollout_flow_steps`.
-
-**Long rollout videos** (`--rollout-video`): single GT frame `obs[0]` as context; for step `g` predicting frame `g`, attend to all past latents while `g <= L`, then the previous `L` only (`L` = `--attn-window`, default `train.rollout_ctx`). Default rollout length 64 (`--rollout-length`). Writes `videos/rollout_video_*.mp4`, `videos/rollout_video_*_gt_pred.mp4` (GT over pred), and `video_metrics.json`.
-
-**Episode selection**: `--split train|val|all`; `--min-episode-return` / `--max-episode-return`; `--by-reward-bands` for Walker Walk return strata (writes `summary.json` + per-band dirs).
+Walker configs merge `policy_eval.yaml` under `dreamer4-eval`. See each CLI `--help` for panels, videos, episode filters, and `--gpus`.
 
 ```bash
-# Panels + metrics on val split
 uv run python -m eval.dynamics_rollout configs/walker_walk/bc_dynamics.yaml \
-  --dynamics-ckpt logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt \
-  --out-dir logs/walker_walk/bc_dynamics_10m/rollout_eval \
-  --split val --max-items 4
+  --dynamics-ckpt logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt --split val
 
-# 64-step rollout mp4s (context obs[0], attn window 8)
-uv run python -m eval.dynamics_rollout configs/walker_walk/bc_dynamics.yaml \
-  --dynamics-ckpt logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt \
-  --out-dir logs/walker_walk/bc_dynamics_10m/rollout_videos \
-  --rollout-video --rollout-length 64 --attn-window 8 --max-items 2
+uv run dreamer4-eval configs/walker_walk/bc_dynamics.yaml \
+  --bc-ckpt logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt
 
-# Rollout stratified by cumulative return
-uv run python -m eval.dynamics_rollout configs/walker_walk/bc_dynamics.yaml \
-  --dynamics-ckpt logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt \
-  --out-dir logs/walker_walk/bc_dynamics_10m/rollout_bands \
-  --by-reward-bands --split val
-```
-
-### Online policy eval (DMC)
-
-CLI: `dreamer4-eval` (`eval/policy.py`) — thin wrapper over `dreamer4/agent.py` and `dreamer4/eval_utils.py` (`DreamerAgent`, `run_policy_env_eval`, `AsyncPolicyEval`). Loads weights from `--bc-ckpt` / `cfg.bc_ckpt` (BC or post-RL checkpoints share the same `PolicyModel` arch). **No `--rl-ckpt` flag yet** — RL env metrics during training come from async eval with in-memory weights; offline RL-only eval uses `eval/imagination.py` (latent rollout videos) or pass an RL checkpoint path via config override once supported.
-
-When the training YAML lives in `configs/walker_walk/`, merges `policy_eval.yaml` underneath it for heavier offline eval defaults (`episodes: 50`, `num_envs: 8`; training yaml `eval.episodes` is typically smaller). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan + forward every env step); **L>1** = forward once then execute MTP slots `1..L` without re-forwarding, but still **encode every env frame** and commit actions into `(z, a)` history (capped by `model.action_horizon - 1`).
-
-**Multi-GPU**: `--gpus 8` splits 50 episodes across 8 GPUs; each GPU runs `eval.num_envs` parallel envs (8 in `policy_eval.yaml`).
-
-**Policy video** (`--video-out`): one online episode mp4; `--annotate-video` overlays `step 0, 1, …` (top-right) and episode return on the last frame.
-
-```bash
-CKPT=logs/walker_walk/bc_dynamics_10m/checkpoints/step-step=50000.ckpt
-CFG=configs/walker_walk/bc_dynamics.yaml
-
-# 50 episodes, 8 GPUs × 8 envs per GPU
-uv run dreamer4-eval $CFG --bc-ckpt $CKPT \
-  --episodes 50 --gpus 8 \
-  --out logs/walker_walk/bc_dynamics_10m/eval/env_step_50000.json
-
-# Annotated policy eval video
-uv run dreamer4-eval $CFG --bc-ckpt $CKPT \
-  --video-out logs/walker_walk/bc_dynamics_10m/eval/policy_video_step50000.mp4 \
-  --annotate-video --video-fps 20
-```
-
-### Dynamics rollout videos (expert vs weak, 64-step)
-
-Pick episodes by **full-episode cumulative return**, then extract a **64-step** transition window (`--rollout-length 64` sets dataset `seq_len=64`). Open-loop rollout from `obs[0]` with dataset actions; `--annotate-steps` labels each frame `step 0, 1, …` (top-right).
-
-```bash
-CKPT=logs/walker_walk/bc_dynamics_10m/checkpoints/step-step=50000.ckpt
-CFG=configs/walker_walk/bc_dynamics.yaml
-
-# Expert trajectory (return >= 900)
-uv run python -m eval.dynamics_rollout $CFG \
-  --dynamics-ckpt $CKPT \
-  --out-dir logs/walker_walk/bc_dynamics_10m/rollout_expert64_step50000 \
-  --split all --max-items 1 \
-  --min-episode-return 900 \
-  --rollout-video --rollout-length 64 --attn-window 8 \
-  --skip-panel --annotate-steps --video-fps 15
-
-# Weak trajectory (return < 200)
-uv run python -m eval.dynamics_rollout $CFG \
-  --dynamics-ckpt $CKPT \
-  --out-dir logs/walker_walk/bc_dynamics_10m/rollout_weak64_step50000 \
-  --split all --max-items 1 \
-  --max-episode-return 200 \
-  --rollout-video --rollout-length 64 --attn-window 8 \
-  --skip-panel --annotate-steps --video-fps 15
-```
-
-Outputs: `videos/rollout_video_ep*_ret*.mp4` (predicted frames) and `videos/rollout_video_ep*_ret*_gt_pred.mp4` (GT over pred), plus `video_metrics.json`.
-
-### Imagination rollout videos (RL policy)
-
-Script: `eval/imagination.py`. Picks dataset episodes by cumulative return, encodes a context window (suffix-style, matching RL training), rolls out **policy-sampled** actions in latent space, decodes frames, and writes mp4s. Uses `--rl-ckpt` (not `dreamer4-eval`).
-
-```bash
 uv run python -m eval.imagination configs/walker_walk/policy_imagination_pmpo.yaml \
-  --rl-ckpt logs/walker_walk/rl_pmpo/checkpoints/step-step=7000.ckpt \
-  --out-dir logs/walker_walk/rl_pmpo/imagine_videos_step7000 \
-  --min-episode-return 900 --max-items 1
+  --rl-ckpt logs/walker_walk/rl_pmpo/checkpoints/last.ckpt
 ```
 
 ## Observation modes
