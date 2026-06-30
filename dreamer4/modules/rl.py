@@ -22,7 +22,7 @@ from dreamer4.models.policy import (
     SymExpTwoHotEncoder,
     SymExpTwoHotHead,
 )
-from dreamer4.callbacks import AsyncBCEval
+from dreamer4.callbacks import AsyncPolicyEval
 
 
 @dataclass
@@ -173,7 +173,7 @@ class RLModule(BaseModule):
         init_value_head_from_reward_head(self.value_head, self.model.heads.reward_head)
 
         self.bc_space_mode = self.model.bc_space_mode
-        self._env_eval = AsyncBCEval()
+        self._env_eval = AsyncPolicyEval()
 
     def configure_optimizers(self):
         opt_cfg = self.cfg.train.optimizer

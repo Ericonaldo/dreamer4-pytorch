@@ -27,13 +27,14 @@ from omegaconf import DictConfig
 
 from dreamer4.config import load_config
 from dreamer4.data import align_dynamics_batch
-from eval.data_stats import episode_cumulative_returns, select_episodes_by_return
-from eval.dynamics_rollout import _load_rollout_batch_from_picked
 from dreamer4.models.dynamics import (
     decode_packed_to_images,
     pack_bottleneck_to_spatial,
 )
-from dreamer4.agent import load_bc_modules
+from dreamer4.agent import load_policy_modules
+
+from eval.data_stats import episode_cumulative_returns, select_episodes_by_return
+from eval.dynamics_rollout import _load_rollout_batch_from_picked
 from eval.viz.annotate import annotate_frames_uint8
 from eval.viz.panels import rollout_panels_multictx_uint8
 from eval.viz.rollout import stack_gt_pred_video_uint8
@@ -84,7 +85,7 @@ def _collect_imagined_latents(
 
 
 def _load_rl_policy_model(cfg: DictConfig, rl_ckpt: Path, device: torch.device):
-    model, tokenizer = load_bc_modules(cfg, device)
+    model, tokenizer = load_policy_modules(cfg, device)
     ckpt = torch.load(rl_ckpt, map_location="cpu", weights_only=False)
     state = ckpt.get("state_dict", ckpt)
     filtered = {

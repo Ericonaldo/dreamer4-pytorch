@@ -1,4 +1,4 @@
-"""Online BC policy inference (load checkpoint → act in env)."""
+"""Online policy inference (load checkpoint → act in env)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from dreamer4.models.dynamics import pack_bottleneck_to_spatial
 from dreamer4.models.policy import POLICY_ENV_ACTION_SLOT
 
 
-def load_bc_modules(
+def load_policy_modules(
     cfg: DictConfig,
     device: torch.device,
     *,
@@ -73,8 +73,8 @@ def resolve_eval_action_horizon(cfg: DictConfig) -> int:
     return max(1, min(eval_h, model_h - 1))
 
 
-class BCPolicy:
-    """Online BC agent with optional batched env slots (encode → PolicyModel → MTP action)."""
+class DreamerAgent:
+    """Online agent with optional batched env slots (encode → PolicyModel → MTP action)."""
 
     def __init__(
         self,
@@ -93,7 +93,7 @@ class BCPolicy:
         self.open_loop_steps = resolve_eval_action_horizon(cfg)
 
         if model is None or tokenizer is None:
-            self.model, self.tokenizer = load_bc_modules(cfg, device)
+            self.model, self.tokenizer = load_policy_modules(cfg, device)
         else:
             self.model = model
             self.tokenizer = tokenizer

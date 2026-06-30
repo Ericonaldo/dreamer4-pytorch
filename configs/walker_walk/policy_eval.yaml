@@ -1,5 +1,5 @@
-# Offline policy eval defaults for dreamer4-eval (merged under the training YAML you pass).
-# Example: dreamer4-eval configs/walker_walk/bc_dynamics.yaml --policy bc --bc-ckpt ...
+# Online policy eval defaults for dreamer4-eval.
+# Example: dreamer4-eval configs/walker_walk/bc_dynamics.yaml --bc-ckpt ...
 eval:
   task: walker_walk
   image_size: 64

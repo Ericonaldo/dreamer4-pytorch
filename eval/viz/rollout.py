@@ -13,7 +13,7 @@ def stack_gt_pred_video_uint8(
     gt_bthwc: torch.Tensor,
     pred_bthwc: torch.Tensor,
 ) -> np.ndarray:
-    """(T,H,W,C) GT on top, pred on bottom -> (T, 2H, W, C) uint8."""
+    """Stack GT above pred for one trajectory: (B,T,H,W,C) -> (T, 2H, W, C) uint8."""
     t = min(gt_bthwc.shape[1], pred_bthwc.shape[1])
     gt = (gt_bthwc[0, :t].clamp(0, 1) * 255.0).to(torch.uint8).cpu().numpy()
     pred = (pred_bthwc[0, :t].clamp(0, 1) * 255.0).to(torch.uint8).cpu().numpy()
@@ -40,6 +40,12 @@ def run_dynamics_rollout_eval(
 ) -> tuple[dict[str, float], np.ndarray, torch.Tensor, torch.Tensor] | tuple[
     dict[str, float], np.ndarray, torch.Tensor, torch.Tensor, list[np.ndarray]
 ]:
+    """Fixed-horizon dynamics rollout plus multi-context panel image(s).
+
+    Wraps ``dynamics_rollout_eval`` and renders uint8 panels via
+    ``rollout_panels_multictx_uint8``. Returns metrics, combined panel, GT/pred
+    frame tensors; with ``return_per_traj=True``, also one panel per trajectory.
+    """
     from eval.viz.panels import rollout_panels_multictx_uint8
 
     result = dynamics_rollout_eval(
@@ -84,6 +90,11 @@ def run_dynamics_rollout_video(
     flow_steps: int,
     max_items: int = 4,
 ) -> tuple[dict[str, float], list[np.ndarray], list[np.ndarray], torch.Tensor, torch.Tensor]:
+    """Long sliding-window rollout; export per-trajectory pred and GT|pred compare videos.
+
+    Wraps ``dynamics_rollout_video``. Returns metrics, ``pred_videos`` and
+    ``compare_videos`` (each a list of (T,H,W,C) uint8 arrays), plus raw GT/pred tensors.
+    """
     result = dynamics_rollout_video(
         dynamics,
         tokenizer,
