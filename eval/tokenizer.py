@@ -4,7 +4,7 @@ Writes per-split panels (target | masked | recon_masked | recon_full) and metric
 
 Example::
 
-    python -m dreamer4.eval_tokenizer configs/walker_walk/tokenizer_5m.yaml \\
+    python -m eval.tokenizer configs/walker_walk/tokenizer_5m.yaml \\
       --tokenizer-ckpt logs/walker_walk/tokenizer_5m/checkpoints/step-step=20000.ckpt \\
       --out-dir analysis/tokenizer_5m_eval \\
       --splits train val \\
@@ -23,6 +23,7 @@ import numpy as np
 import torch
 from omegaconf import DictConfig
 
+from dreamer4.checkpoint import load_state
 from dreamer4.config import load_config
 from dreamer4.data import (
     GranularEpisodeDataset,
@@ -33,32 +34,9 @@ from dreamer4.data import (
     split_episode_indices,
 )
 from dreamer4.models import build_tokenizer
-from dreamer4.models.tokenizer import recon_panel_uint8, tokenizer_forward_with_aux
-
-DEFAULT_REWARD_BANDS: list[tuple[str, float, float]] = [
-    ("fallen_0_50", 0.0, 50.0),
-    ("fallen_50_200", 50.0, 200.0),
-    ("weak_200_500", 200.0, 500.0),
-    ("partial_500_900", 500.0, 900.0),
-    ("standing_900_970", 900.0, 970.0),
-    ("expert_970_plus", 970.0, 1001.0),
-]
-
-PRIORITY_BANDS: list[tuple[str, float, float]] = [
-    ("low_under_200", 0.0, 200.0),
-    ("high_over_900", 900.0, 1001.0),
-]
-
-
-def _load_state(module: torch.nn.Module, ckpt_path: str, *, prefix: str = "model.") -> None:
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    state = ckpt.get("state_dict", ckpt)
-    filtered = {
-        k.removeprefix(prefix): v
-        for k, v in state.items()
-        if k.startswith(prefix) and "attn_mask" not in k
-    }
-    module.load_state_dict(filtered, strict=False)
+from dreamer4.models.tokenizer import tokenizer_forward_with_aux
+from eval.common import DEFAULT_REWARD_BANDS
+from eval.viz.panels import recon_panel_uint8
 
 
 def _episode_filter_for_split(cfg: DictConfig, split: str) -> set[int] | None:
@@ -80,6 +58,12 @@ def _episode_filter_for_split(cfg: DictConfig, split: str) -> set[int] | None:
     if split == "val":
         return set(val_episodes)
     raise ValueError(f"split must be 'train', 'val', or 'all', got {split!r}")
+
+
+PRIORITY_BANDS: list[tuple[str, float, float]] = [
+    ("low_under_200", 0.0, 200.0),
+    ("high_over_900", 900.0, 1001.0),
+]
 
 
 def _frame_window_offset(ep_len: int, seq_len: int, *, position: str = "middle") -> int:
@@ -229,7 +213,7 @@ def run_eval(
     device: torch.device,
 ) -> dict[str, Any]:
     model = build_tokenizer(cfg.model)
-    _load_state(model, str(tokenizer_ckpt))
+    load_state(model, str(tokenizer_ckpt))
     model.to(device)
     model.eval()
 

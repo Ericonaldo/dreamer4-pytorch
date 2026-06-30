@@ -1,4 +1,4 @@
-"""DMC Walker Walk policy evaluation (online env rollout)."""
+"""DMC Walker Walk policy evaluation CLI."""
 
 from __future__ import annotations
 
@@ -6,18 +6,52 @@ import argparse
 import json
 from pathlib import Path
 
+import imageio.v3 as iio
+import torch
 from omegaconf import OmegaConf
 
 from dreamer4.config import load_config
 from dreamer4.env import make_dmc_env
-from dreamer4.policy_agent import (
+from dreamer4.eval_utils import (
     RandomPolicy,
     parse_eval_gpu_ids,
     run_bc_env_eval,
-    run_bc_policy_video,
+    run_bc_policy_episode,
     run_episodes,
     summarize_episodes,
 )
+from eval.viz.annotate import annotate_frames_uint8
+
+
+def run_bc_policy_video(
+    cfg,
+    out_path: Path,
+    *,
+    fps: int = 20,
+    gpu_id: int | None = 0,
+    annotate_steps: bool = False,
+) -> dict:
+    if gpu_id is not None and torch.cuda.is_available():
+        torch.cuda.set_device(gpu_id)
+        device = torch.device(f"cuda:{gpu_id}")
+    else:
+        device = torch.device("cpu")
+
+    frames_arr, ep_return, ep_len = run_bc_policy_episode(cfg, device)
+    if annotate_steps:
+        labels = [f"step {t}" for t in range(len(frames_arr))]
+        labels[-1] = f"step {len(frames_arr) - 1}  return {ep_return:.0f}"
+        frames_arr = annotate_frames_uint8(frames_arr, labels)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    iio.imwrite(out_path, frames_arr, fps=fps, codec="h264")
+    return {
+        "return": ep_return,
+        "length": ep_len,
+        "frames": len(frames_arr),
+        "video": str(out_path),
+        "fps": fps,
+    }
 
 
 def main() -> None:
@@ -68,19 +102,18 @@ def main() -> None:
             raise ValueError("--video-out requires --policy bc")
         if not cfg.get("bc_ckpt"):
             raise ValueError("BC video requires bc_ckpt in config or --bc-ckpt")
-        import torch
-
         gpu_id = 0 if torch.cuda.is_available() else None
         if args.gpus is not None:
             gpu_id = 0
-        video_metrics = run_bc_policy_video(
-            cfg,
-            args.video_out,
-            fps=int(args.video_fps),
-            gpu_id=gpu_id,
-            annotate_steps=args.annotate_video,
+        metrics.update(
+            run_bc_policy_video(
+                cfg,
+                args.video_out,
+                fps=int(args.video_fps),
+                gpu_id=gpu_id,
+                annotate_steps=args.annotate_video,
+            )
         )
-        metrics.update(video_metrics)
 
     if args.policy == "random":
         env = make_dmc_env(
@@ -97,9 +130,6 @@ def main() -> None:
     else:
         if not cfg.get("bc_ckpt"):
             raise ValueError("BC eval requires bc_ckpt in config or --bc-ckpt")
-        import torch
-
-        eval_cfg = cfg.get("eval", {})
         gpu_ids = parse_eval_gpu_ids(eval_cfg.get("gpu_ids", "all"))
         if args.gpus is not None:
             gpu_ids = list(range(args.gpus))

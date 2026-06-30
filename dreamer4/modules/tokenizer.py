@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-import imageio.v3 as iio
 import torch
 import torch.nn as nn
-from lightning.pytorch.loggers import WandbLogger
 from omegaconf import DictConfig
 
+from dreamer4.callbacks import log_recon_panel
 from dreamer4.modules.base import BaseModule
 
 
@@ -93,33 +90,8 @@ class TokenizerModule(BaseModule):
         if self._val_viz is None or not self.trainer.is_global_zero:
             return
 
-        from dreamer4.models import recon_panel_uint8
-
         image, pred, mae_mask = self._val_viz
         self._val_viz = None
         self._val_viz_idx = None
 
-        panel = recon_panel_uint8(
-            image,
-            pred,
-            mae_mask,
-            self.patch_size,
-            max_items=int(self.cfg.log.get("viz_max_items", 4)),
-            max_T=int(self.cfg.log.get("viz_max_T", 6)),
-        )
-        step = int(self.trainer.global_step)
-        run_dir = Path(self.cfg.log.dir) / self.cfg.log.run_name
-        viz_dir = run_dir / "viz"
-        viz_dir.mkdir(parents=True, exist_ok=True)
-        viz_path = viz_dir / f"step_{step:08d}.png"
-        iio.imwrite(viz_path, panel)
-
-        caption = "rows=target/masked/recon_masked/recon_full"
-        for logger in self.trainer.loggers:
-            if isinstance(logger, WandbLogger):
-                import wandb
-
-                logger.experiment.log(
-                    {"tokenizer/viz": wandb.Image(panel, caption=caption)},
-                    step=step,
-                )
+        log_recon_panel(self, self.cfg, image, pred, mae_mask, self.patch_size)

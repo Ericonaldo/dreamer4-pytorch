@@ -8,8 +8,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
+from dreamer4.config import config_to_dict
 from dreamer4.models.transformer_blocks import (
     BlockCausalTransformer,
     MAEReplacer,
@@ -211,15 +212,9 @@ def _as_bool(cfg: Mapping[str, Any], key: str, default: bool) -> bool:
     return bool(cfg.get(key, default))
 
 
-def _cfg_dict(cfg: Mapping[str, Any] | DictConfig) -> dict[str, Any]:
-    if isinstance(cfg, DictConfig):
-        return OmegaConf.to_container(cfg, resolve=True)  # type: ignore[return-value]
-    return dict(cfg)
-
-
 def build_tokenizer(cfg: Mapping[str, Any] | DictConfig) -> Tokenizer:
     """Build Tokenizer from YAML `model` or `model.tokenizer` (OmegaConf dict)."""
-    raw = _cfg_dict(cfg)
+    raw = config_to_dict(cfg)
     H = _as_int(raw, "image_size", 64)
     W = _as_int(raw, "image_size", 64)
     C = _as_int(raw, "channels", 3)
@@ -399,62 +394,3 @@ def tokenizer_forward_with_aux(
         loss = mse
 
     return loss, metrics, pred, patches, mae_mask
-
-
-_ROW_LABELS = ("target", "masked", "recon_masked", "recon_full")
-
-
-def _annotate_panel_rows(panel_hwc: np.ndarray, row_h: int, n_samples: int) -> np.ndarray:
-    from PIL import Image, ImageDraw, ImageFont
-
-    img = Image.fromarray(panel_hwc)
-    draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 11)
-    except OSError:
-        font = ImageFont.load_default()
-    for s in range(n_samples):
-        for r, label in enumerate(_ROW_LABELS):
-            y = s * 4 * row_h + r * row_h + 2
-            draw.text((4, y), label, fill=(255, 255, 255), stroke_width=1, stroke_fill=(0, 0, 0), font=font)
-    return np.asarray(img)
-
-
-def recon_panel_uint8(
-    image_bthwc: torch.Tensor,
-    pred_btnd: torch.Tensor,
-    mae_mask_btNp1: torch.Tensor,
-    patch_size: int,
-    max_items: int = 4,
-    max_T: int = 6,
-) -> np.ndarray:
-    """Panel image: rows = target | masked | recon_masked | recon_full per sample."""
-    B, T, H, W, C = image_bthwc.shape
-    Tv = min(T, max_T)
-    Bv = min(B, max_items)
-
-    x_btc_hw = image_bthwc[:Bv, :Tv].permute(0, 1, 4, 2, 3).contiguous()
-    target_btnd = temporal_patchify(x_btc_hw, patch_size)
-    mask = mae_mask_btNp1[:Bv, :Tv]
-    pred = pred_btnd[:Bv, :Tv]
-
-    masked_input_btnd = torch.where(mask, torch.zeros_like(target_btnd), target_btnd)
-    recon_masked_btnd = torch.where(mask, pred, target_btnd)
-    recon_full_btnd = pred
-
-    target_img = temporal_unpatchify(target_btnd, H, W, C, patch_size)
-    masked_img = temporal_unpatchify(masked_input_btnd, H, W, C, patch_size)
-    rmask_img = temporal_unpatchify(recon_masked_btnd, H, W, C, patch_size)
-    rfull_img = temporal_unpatchify(recon_full_btnd, H, W, C, patch_size)
-
-    def tile_time(x: torch.Tensor) -> torch.Tensor:
-        return x.permute(0, 2, 3, 1, 4).contiguous().view(x.shape[0], C, H, Tv * W)
-
-    panel = torch.cat(
-        [tile_time(target_img), tile_time(masked_img), tile_time(rmask_img), tile_time(rfull_img)],
-        dim=2,
-    )
-    big = torch.cat([panel[i] for i in range(Bv)], dim=1)
-    big = (big.clamp(0, 1) * 255.0).to(torch.uint8)
-    out = big.permute(1, 2, 0).cpu().numpy()
-    return _annotate_panel_rows(out, H, Bv)

@@ -6,20 +6,10 @@ import torch
 from lightning.pytorch.utilities import rank_zero_warn
 from omegaconf import DictConfig
 
-from dreamer4.policy_agent import AsyncBCEval
+from dreamer4.callbacks import AsyncBCEval
 from dreamer4.data import align_dynamics_batch
+from dreamer4.checkpoint import load_state
 from dreamer4.modules.base import BaseModule
-
-
-def _load_state(module: torch.nn.Module, ckpt_path: str, *, prefix: str = "model.") -> None:
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    state = ckpt.get("state_dict", ckpt)
-    filtered = {
-        k.removeprefix(prefix): v
-        for k, v in state.items()
-        if k.startswith(prefix) and "attn_mask" not in k
-    }
-    module.load_state_dict(filtered, strict=False)
 
 
 class BCModule(BaseModule):
@@ -38,7 +28,7 @@ class BCModule(BaseModule):
 
         self.tokenizer = build_tokenizer(cfg.model.tokenizer)
         if cfg.get("tokenizer_ckpt"):
-            _load_state(self.tokenizer, cfg.tokenizer_ckpt, prefix="model.")
+            load_state(self.tokenizer, cfg.tokenizer_ckpt, prefix="model.")
         for p in self.tokenizer.parameters():
             p.requires_grad_(False)
 
@@ -56,7 +46,7 @@ class BCModule(BaseModule):
             heads_cfg=cfg.model,
         )
         if cfg.get("dynamics_ckpt"):
-            _load_state(self.model.dynamics, cfg.dynamics_ckpt, prefix="model.")
+            load_state(self.model.dynamics, cfg.dynamics_ckpt, prefix="model.")
 
         for p in self.model.dynamics.flow_head.parameters():
             p.requires_grad_(False)

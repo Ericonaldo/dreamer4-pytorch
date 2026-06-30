@@ -9,8 +9,10 @@ from typing import Any, Mapping, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from torch.distributions import Normal
+
+from dreamer4.config import config_to_dict
 
 
 # MTP slot l at aligned time t predicts action a_{t+l}; from state s_t execute a_{t+1} (slot 1).
@@ -131,12 +133,6 @@ def init_value_head_from_reward_head(
         n_bins = value_head.encoder.num_bins
         vh_net[-1].weight.copy_(rh_net[-1].weight[:n_bins])
         vh_net[-1].bias.copy_(rh_net[-1].bias[:n_bins])
-
-
-def _cfg_dict(cfg: Mapping[str, Any] | DictConfig) -> dict[str, Any]:
-    if isinstance(cfg, DictConfig):
-        return OmegaConf.to_container(cfg, resolve=True)  # type: ignore[return-value]
-    return dict(cfg)
 
 
 class SquashedGaussianHead(nn.Module):
@@ -331,7 +327,7 @@ class PolicyModel(nn.Module):
         super().__init__()
         from dreamer4.models.dynamics import DynamicsModel
 
-        raw = _cfg_dict(dynamics_cfg)
+        raw = config_to_dict(dynamics_cfg)
         self.action_dim = int(raw["action_dim"])
         self.n_agent = int(raw.get("n_agent", 1))
         self.d_model = int(raw["embed_dim"])
@@ -344,7 +340,7 @@ class PolicyModel(nn.Module):
         self.bc_space_mode = str(raw.get("bc_space_mode", "wm_agent"))
         self.agent_tokens = nn.Parameter(torch.empty(self.n_agent, self.d_model))
         nn.init.normal_(self.agent_tokens, std=0.02)
-        heads = _cfg_dict(heads_cfg)
+        heads = config_to_dict(heads_cfg)
         self.heads = AgentHeads(
             self.d_model,
             self.action_dim,
@@ -492,7 +488,6 @@ def pmpo_policy_loss(
     mask_neg = flat_adv < 0
     n_pos = int(mask_pos.sum().item())
     n_neg = int(mask_neg.sum().item())
-    # Safe denominators: empty mask → sum is 0, loss term is 0 (matches jax ref).
     loss_neg = (1.0 - alpha) * (flat_lp * mask_neg).sum() / max(n_neg, 1)
     loss_pos = -alpha * (flat_lp * mask_pos).sum() / max(n_pos, 1)
     return loss_neg + loss_pos

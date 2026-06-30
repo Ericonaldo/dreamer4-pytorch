@@ -130,7 +130,7 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 - [x] Latent temporal collapse — tune `embed_dim` / `latent_dim` (default configs: `embed_dim=64`, `latent_dim=32`, `patch_size=8`, `n_latents=16`; large 512-dim runs collapsed); monitor `tokenizer/z_temporal_std`
 - [x] Robust checkpoint pruning (`KeepLastCheckpoints` handles Lightning `-v1` suffixes, rank-0 only)
 - [x] Resume from Lightning checkpoint (`train.resume_ckpt`)
-- [x] Standalone tokenizer eval script (recon metrics + panels from checkpoint) — see `eval_tokenizer.py`
+- [x] Standalone tokenizer eval script (recon metrics + panels from checkpoint) — see `eval/tokenizer.py`
 - [ ] Ablation: `scale_pos_embeds` off (paper notes it can help)
 
 ### Dynamics (stage 2)
@@ -159,7 +159,7 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 
 ### Policy / imagination (stage 4)
 
-- [x] `imagine_rollout` in latent space (`imagination.py` stub)
+- [x] `imagine_latent_rollout` in latent space (`modules/rl.py`)
 - [x] `RLModule` — imagination RL on top of BC (`modules/rl.py`); value head with TD(λ) return targets
 - [x] Config `configs/walker_walk/policy_imagination_pmpo.yaml`
 - [x] RL post-training stability: `init_value_head_from_reward_head`, policy warmup (value-only), `context_len_min`, `32-true` precision, PMPO log-prob recompute on fixed actions (see `analysis/imagination_rl.md`)
@@ -167,7 +167,7 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 ### Data & infra
 
 - [ ] `data.obs_mode=proprio` / `both` paths through dynamics & policy (tokenizer is image-only today)
-- [x] DMC online env eval (`env.py` + `policy_agent.py`; CLI `dreamer4-eval`, training `AsyncBCEval`)
+- [x] DMC online env eval (`env.py` + `agent.py`; CLI `dreamer4-eval`, training `AsyncBCEval`)
 
 ## Setup
 
@@ -289,7 +289,7 @@ Episode-level hold-out via `data.val_fraction` (default 5%). Metrics: `val/loss_
 
 ### Dynamics rollout eval (standalone)
 
-Script: `dreamer4/eval_dynamics_rollout.py`. Loads frozen tokenizer + dynamics checkpoint, replays **dataset actions** (open-loop), decodes latents, and compares to GT.
+Script: `eval/dynamics_rollout.py`. Loads frozen tokenizer + dynamics checkpoint, replays **dataset actions** (open-loop) via `dreamer4.eval_utils.dynamics_rollout_eval` / `dynamics_rollout_video`, decodes latents, and compares to GT.
 
 **Panel eval** (default): autoregressive rollout with context lengths `ctx=1..rollout_ctx`; GT frames in context, predicted frames after. Outputs `rollout_panel_all.png`, `rollout_traj_{i:02d}.png`, and `metrics.json` (`rollout_mse`, `rollout_psnr`, repeat-last-frame floor). Horizon comes from `train.rollout_ctx`, `train.rollout_horizon`, `train.rollout_flow_steps`.
 
@@ -299,19 +299,19 @@ Script: `dreamer4/eval_dynamics_rollout.py`. Loads frozen tokenizer + dynamics c
 
 ```bash
 # Panels + metrics on val split
-uv run python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yaml \
+uv run python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \
   --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \
   --out-dir logs/walker_walk/dynamics/rollout_eval \
   --split val --max-items 4
 
 # 64-step rollout mp4s (context obs[0], attn window 8)
-uv run python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yaml \
+uv run python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \
   --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \
   --out-dir logs/walker_walk/dynamics/rollout_videos \
   --rollout-video --rollout-length 64 --attn-window 8 --max-items 2
 
 # Rollout stratified by cumulative return
-uv run python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yaml \
+uv run python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \
   --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \
   --out-dir logs/walker_walk/dynamics/rollout_bands \
   --by-reward-bands --split val
@@ -319,7 +319,7 @@ uv run python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yam
 
 ### BC policy eval (online DMC)
 
-CLI: `dreamer4-eval` (`dreamer4/eval_policy.py`) — thin wrapper over `dreamer4/policy_agent.py` (`BCPolicy`, `run_bc_env_eval`, `AsyncBCEval`). Merges `configs/walker_walk/policy_eval.yaml` when present (`max_history: 16`, `episodes: 50`, `num_envs: 8`). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan + forward every env step); **L>1** = forward once then execute MTP slots `1..L` without re-forwarding, but still **encode every env frame** and commit actions into `(z, a)` history (capped by `model.action_horizon - 1`). Regenerate horizon sweep charts with `python -m dreamer4.plot_action_horizon_eval`.
+CLI: `dreamer4-eval` (`eval/policy.py`) — thin wrapper over `dreamer4/agent.py` and `dreamer4/eval_utils.py` (`BCPolicy`, `run_bc_env_eval`, `AsyncBCEval`). Merges `configs/walker_walk/policy_eval.yaml` when present (`max_history: 16`, `episodes: 50`, `num_envs: 8`). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan + forward every env step); **L>1** = forward once then execute MTP slots `1..L` without re-forwarding, but still **encode every env frame** and commit actions into `(z, a)` history (capped by `model.action_horizon - 1`). Regenerate horizon sweep charts with `python -m dreamer4.plot_action_horizon_eval`.
 
 **Multi-GPU**: `--gpus 8` splits 50 episodes across 8 GPUs; each GPU runs `eval.num_envs` parallel envs (8 in `bc_dynamics_10m.yaml`).
 
@@ -349,7 +349,7 @@ CKPT=logs/walker_walk/bc_dynamics_10m/checkpoints/step-step=50000.ckpt
 CFG=configs/walker_walk/bc_dynamics_10m.yaml
 
 # Expert trajectory (return >= 900)
-uv run python -m dreamer4.eval_dynamics_rollout $CFG \
+uv run python -m eval.dynamics_rollout $CFG \
   --dynamics-ckpt $CKPT \
   --out-dir logs/walker_walk/bc_dynamics_10m/rollout_expert64_step50000 \
   --split all --max-items 1 \
@@ -358,7 +358,7 @@ uv run python -m dreamer4.eval_dynamics_rollout $CFG \
   --skip-panel --annotate-steps --video-fps 15
 
 # Weak trajectory (return < 200)
-uv run python -m dreamer4.eval_dynamics_rollout $CFG \
+uv run python -m eval.dynamics_rollout $CFG \
   --dynamics-ckpt $CKPT \
   --out-dir logs/walker_walk/bc_dynamics_10m/rollout_weak64_step50000 \
   --split all --max-items 1 \
@@ -382,6 +382,7 @@ Set `data.obs_mode` in config:
 ```
 dreamer4/
   config.py           # YAML config (OmegaConf)
+  checkpoint.py       # load_state for Lightning ckpts
   data.py             # Granular dataset + batch collation
   models/             # NN modules
     transformer_blocks.py
@@ -394,15 +395,20 @@ dreamer4/
     dynamics.py
     bc.py
     bc_dynamics.py
-    policy.py
-  imagination.py      # Latent rollouts (stub)
-  train.py            # Trainer, callbacks, dataloaders
-  cli.py
-  policy_agent.py         # BCPolicy, online eval, AsyncBCEval (used by eval_policy + BC modules)
-  eval_dynamics_rollout.py  # Standalone dynamics rollout panels + optional mp4
-  eval_policy.py            # CLI: dreamer4-eval (random / BC metrics / policy video)
-  eval_tokenizer.py         # Standalone tokenizer recon eval
-  video_utils.py            # Frame annotation for eval videos
+    rl.py
+  agent.py            # BCPolicy, load_bc_modules (online inference)
+  env.py              # DMC environment
+  eval_utils.py       # Eval rollouts: dynamics (offline) + BC policy (online DMC)
+  callbacks.py        # Lightning callbacks, AsyncBCEval, val panel logging
+  train.py            # Trainer, dataloaders, dreamer4-train entry
+eval/                 # Standalone eval scripts + viz
+  common.py
+  smoke_test.py       # Checkpoint compatibility baseline
+  dynamics_rollout.py
+  tokenizer.py
+  imagination.py
+  policy.py           # dreamer4-eval CLI
+  viz/                # Panel / frame annotations
 configs/walker_walk/
   tokenizer.yaml
   tokenizer_5m.yaml

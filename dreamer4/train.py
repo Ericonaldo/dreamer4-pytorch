@@ -1,119 +1,23 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import lightning as L
 import torch
-from lightning.pytorch.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
-from lightning.pytorch.utilities import rank_zero_warn
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
-from dreamer4.config import save_config
+from dreamer4.callbacks import (
+    KeepLastCheckpoints,
+    SaveCheckpointAfterPolicyWarmup,
+    ValidateEveryNSteps,
+)
+from dreamer4.config import load_config, save_config
 from dreamer4.data import GranularEpisodeDataset, collate_episodes, split_episode_indices
 from dreamer4.modules import STAGES
-
-
-class ValidateEveryNSteps(Callback):
-    """Run validation every N optimizer steps (works with DDP and small epoch sizes)."""
-
-    def __init__(self, every_n_steps: int, limit_batches: int, val_dataloader: DataLoader):
-        self.every_n_steps = every_n_steps
-        self.limit_batches = limit_batches
-        self.val_dataloader = val_dataloader
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
-        step = trainer.global_step
-        warmup = int(getattr(pl_module, "policy_warmup_steps", 0))
-        if warmup > 0 and step == warmup:
-            return
-        if step > 0 and step % self.every_n_steps == 0:
-            trainer.strategy.barrier()
-            pl_module.eval()
-            n_batches = max(1, min(len(self.val_dataloader), self.limit_batches))
-            pl_module._val_n_batches = n_batches
-            with torch.no_grad():
-                for i, val_batch in enumerate(self.val_dataloader):
-                    if i >= self.limit_batches:
-                        break
-                    val_batch = trainer.strategy.batch_to_device(val_batch)
-                    pl_module.validation_step(val_batch, i)
-            pl_module.on_validation_epoch_end()
-            pl_module._val_n_batches = None
-            pl_module.train()
-            trainer.strategy.barrier()
-
-
-class SaveCheckpointAfterPolicyWarmup(Callback):
-    """RL: save ``warmup_end.ckpt`` when value-only warmup finishes (for easy resume)."""
-
-    def __init__(self, checkpoint_dir: Path, warmup_steps: int):
-        self.checkpoint_dir = checkpoint_dir
-        self.warmup_steps = int(warmup_steps)
-        self._saved = False
-
-    def on_fit_start(self, trainer, pl_module) -> None:
-        if int(trainer.global_step) >= self.warmup_steps:
-            self._saved = True
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
-        if self.warmup_steps <= 0 or self._saved:
-            return
-        step = int(trainer.global_step)
-        if step != self.warmup_steps:
-            return
-        self._saved = True
-        trainer.strategy.barrier()
-        if trainer.is_global_zero:
-            rank_zero_warn(f"Saving post-warmup checkpoint at step {step}...")
-            path = self.checkpoint_dir / "warmup_end.ckpt"
-            trainer.save_checkpoint(str(path))
-            rank_zero_warn(
-                f"Saved post-warmup checkpoint at step {step}: {path} "
-                f"(resume with train.resume_ckpt={path})"
-            )
-        trainer.strategy.barrier()
-        if trainer.is_global_zero:
-            rank_zero_warn(f"Post-warmup checkpoint barrier done at step {step}; continuing training")
-
-
-class KeepLastCheckpoints(Callback):
-    """Keep only the N most recent step checkpoints (ModelCheckpoint needs save_top_k=-1)."""
-
-    def __init__(self, checkpoint_dir: Path, keep_last: int, every_n_steps: int):
-        self.checkpoint_dir = checkpoint_dir
-        self.keep_last = keep_last
-        self.every_n_steps = every_n_steps
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
-        step = trainer.global_step
-        if self.keep_last > 0 and step > 0 and step % self.every_n_steps == 0:
-            if trainer.is_global_zero:
-                self._prune()
-
-    def _prune(self) -> None:
-        ckpts = [p for p in self.checkpoint_dir.glob("*.ckpt") if p.name != "last.ckpt"]
-        ckpts.sort(key=_checkpoint_step)
-        for path in ckpts[:-self.keep_last]:
-            path.unlink(missing_ok=True)
-
-
-def _checkpoint_step(path: Path) -> int:
-    """Extract global step from Lightning checkpoint filename for sorting."""
-    stem = path.stem
-    if stem.isdigit():
-        return int(stem)
-    if "-step=" in stem:
-        tail = stem.rsplit("=", 1)[-1]
-    elif stem.startswith("step-"):
-        tail = stem[5:]
-    else:
-        return 0
-    # Lightning may suffix duplicates: step-step=6500-v1
-    if "-v" in tail:
-        tail = tail.split("-v", 1)[0]
-    return int(tail) if tail.isdigit() else 0
 
 
 def _window_mode(cfg: DictConfig) -> str:
@@ -280,3 +184,15 @@ def train(cfg: DictConfig) -> None:
         val_dataloaders=val_loader,
         ckpt_path=ckpt_path,
     )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train Dreamer4")
+    parser.add_argument("config", type=Path, help="Path to YAML config")
+    parser.add_argument("overrides", nargs="*", help="Config overrides, e.g. train.batch_size=32")
+    args = parser.parse_args()
+    train(load_config(args.config, args.overrides))
+
+
+if __name__ == "__main__":
+    main()

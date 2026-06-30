@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-import imageio.v3 as iio
-import torch
-from lightning.pytorch.loggers import WandbLogger
 from omegaconf import DictConfig
 
+from dreamer4.checkpoint import load_state
 from dreamer4.data import align_dynamics_batch
 from dreamer4.modules.base import BaseModule
 
@@ -20,12 +16,7 @@ class DynamicsModule(BaseModule):
 
         self.tokenizer = build_tokenizer(cfg.model.tokenizer)
         if cfg.get("tokenizer_ckpt"):
-            ckpt = torch.load(cfg.tokenizer_ckpt, map_location="cpu", weights_only=False)
-            state = ckpt.get("state_dict", ckpt)
-            tokenizer_state = {
-                k.removeprefix("model."): v for k, v in state.items() if k.startswith("model.")
-            }
-            self.tokenizer.load_state_dict(tokenizer_state, strict=True)
+            load_state(self.tokenizer, cfg.tokenizer_ckpt, prefix="model.")
         for p in self.tokenizer.parameters():
             p.requires_grad_(False)
 
@@ -83,14 +74,15 @@ class DynamicsModule(BaseModule):
         if self._val_rollout_batch is None or not self.trainer.is_global_zero:
             return
 
-        from dreamer4.models.dynamics import run_dynamics_rollout_eval
+        from dreamer4.eval_utils import dynamics_rollout_eval
+        from dreamer4.callbacks import log_dynamics_rollout_viz
 
         image, action = self._val_rollout_batch
         self._val_rollout_batch = None
         self._val_viz_idx = None
 
         max_items = int(self.cfg.log.get("viz_max_items", 4))
-        metrics, panel, _, _ = run_dynamics_rollout_eval(
+        result = dynamics_rollout_eval(
             self.model,
             self.tokenizer,
             image,
@@ -103,28 +95,16 @@ class DynamicsModule(BaseModule):
             ctx_length=self.rollout_ctx,
             horizon=self.rollout_horizon,
             flow_steps=self.rollout_flow_steps,
-            max_items=max_items,
         )
 
-        for key, value in metrics.items():
+        for key, value in result.metrics.items():
             self.log(f"val/{key}", value, sync_dist=False)
 
-        step = int(self.trainer.global_step)
-        run_dir = Path(self.cfg.log.dir) / self.cfg.log.run_name
-        viz_dir = run_dir / "viz"
-        viz_dir.mkdir(parents=True, exist_ok=True)
-        viz_path = viz_dir / f"rollout_step_{step:08d}.png"
-        iio.imwrite(viz_path, panel)
-
-        caption = (
-            f"rows=gt+ctx=1..{self.rollout_ctx} | horizon={self.rollout_horizon} | "
-            f"psnr_gain={metrics['rollout_psnr_gain']:.2f}"
+        log_dynamics_rollout_viz(
+            self,
+            self.cfg,
+            result,
+            max_items=max_items,
+            rollout_ctx=self.rollout_ctx,
+            rollout_horizon=self.rollout_horizon,
         )
-        for logger in self.trainer.loggers:
-            if isinstance(logger, WandbLogger):
-                import wandb
-
-                logger.experiment.log(
-                    {"dynamics/rollout_viz": wandb.Image(panel, caption=caption)},
-                    step=step,
-                )

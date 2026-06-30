@@ -6,7 +6,7 @@ predicted latents, and writes mp4s.
 
 Example::
 
-    uv run python -m dreamer4.eval_imagination_rollout \\
+    uv run python -m eval.imagination \\
       configs/walker_walk/policy_imagination_pmpo.yaml \\
       --rl-ckpt logs/walker_walk/rl_pmpo/checkpoints/step-step=7000.ckpt \\
       --out-dir logs/walker_walk/rl_pmpo/imagine_videos_step7000 \\
@@ -31,16 +31,16 @@ from dreamer4.data import (
     episode_cumulative_returns,
     select_episodes_by_return,
 )
-from dreamer4.eval_dynamics_rollout import _load_rollout_batch_from_picked
+from eval.dynamics_rollout import _load_rollout_batch_from_picked
 from dreamer4.models.dynamics import (
-    _stack_gt_pred_video_uint8,
     decode_packed_to_images,
     pack_bottleneck_to_spatial,
-    rollout_panels_multictx_uint8,
 )
 from dreamer4.models.tokenizer import encode_images
-from dreamer4.policy_agent import load_bc_modules
-from dreamer4.video_utils import annotate_frames_uint8
+from dreamer4.agent import load_bc_modules
+from eval.viz.annotate import annotate_frames_uint8
+from eval.viz.panels import rollout_panels_multictx_uint8
+from eval.viz.rollout import stack_gt_pred_video_uint8
 
 
 def _collect_imagined_latents(
@@ -298,7 +298,7 @@ def render_imagination_rollout_videos(
 
         gt_full = torch.cat([gt_ctx, gt_future], dim=1)
         im_full = torch.cat([gt_ctx, im_frames], dim=1)
-        compare_video = _stack_gt_pred_video_uint8(gt_full, im_full)
+        compare_video = stack_gt_pred_video_uint8(gt_full, im_full)
 
         pred_videos.append(pred_video)
         compare_videos.append(compare_video)

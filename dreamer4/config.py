@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -19,5 +19,7 @@ def save_config(cfg: DictConfig, path: str | Path) -> None:
     OmegaConf.save(cfg, path)
 
 
-def config_to_dict(cfg: DictConfig) -> dict[str, Any]:
-    return OmegaConf.to_container(cfg, resolve=True)  # type: ignore[return-value]
+def config_to_dict(cfg: DictConfig | Mapping[str, Any]) -> dict[str, Any]:
+    if isinstance(cfg, DictConfig):
+        return OmegaConf.to_container(cfg, resolve=True)  # type: ignore[return-value]
+    return dict(cfg)

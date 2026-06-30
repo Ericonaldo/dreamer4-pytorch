@@ -43,13 +43,13 @@ Episode selection
 
 Example::
 
-    uv run python -m dreamer4.eval_dynamics_rollout \\
+    uv run python -m eval.dynamics_rollout \\
       configs/walker_walk/dynamics.yaml \\
       --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \\
       --out-dir logs/walker_walk/dynamics/rollout_eval \\
       --split val --max-items 4
 
-    uv run python -m dreamer4.eval_dynamics_rollout \\
+    uv run python -m eval.dynamics_rollout \\
       configs/walker_walk/dynamics.yaml \\
       --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \\
       --out-dir logs/walker_walk/dynamics/rollout_videos \\
@@ -69,6 +69,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
+from dreamer4.checkpoint import load_state
 from dreamer4.config import load_config
 from dreamer4.data import (
     GranularEpisodeDataset,
@@ -81,46 +82,8 @@ from dreamer4.data import (
     transition_window_offset,
 )
 from dreamer4.models import DynamicsModel, build_tokenizer
-from dreamer4.models.dynamics import run_dynamics_rollout_eval, run_dynamics_rollout_video
-
-# Walker-walk cumulative return bands (episode sum; max ~1000 at 1000 steps).
-DEFAULT_REWARD_BANDS: list[tuple[str, float, float]] = [
-    ("fallen_0_50", 0.0, 50.0),
-    ("fallen_50_200", 50.0, 200.0),
-    ("weak_200_500", 200.0, 500.0),
-    ("partial_500_900", 500.0, 900.0),
-    ("standing_900_970", 900.0, 970.0),
-    ("expert_970_plus", 970.0, 1001.0),
-]
-
-
-def _load_state(module: torch.nn.Module, ckpt_path: str, *, prefix: str = "model.") -> None:
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    state = ckpt.get("state_dict", ckpt)
-    filtered = {
-        k.removeprefix(prefix): v
-        for k, v in state.items()
-        if k.startswith(prefix) and "attn_mask" not in k
-    }
-    module.load_state_dict(filtered, strict=False)
-
-
-def _episode_filter_for_split(cfg: DictConfig, split: str) -> set[int] | None:
-    if split == "all":
-        return None
-    window_mode = str(cfg.data.get("window_mode", "transition"))
-    probe = GranularEpisodeDataset(
-        cfg.data.path, cfg.data.seq_len, cfg.data.obs_mode, window_mode=window_mode
-    )
-    val_fraction = float(cfg.data.get("val_fraction", 0.05))
-    train_episodes, val_episodes = split_episode_indices(
-        probe.num_episodes, val_fraction, int(cfg.data.get("val_seed", 0))
-    )
-    if split == "train":
-        return set(train_episodes)
-    if split == "val":
-        return set(val_episodes)
-    raise ValueError(f"split must be 'train', 'val', or 'all', got {split!r}")
+from eval.common import DEFAULT_REWARD_BANDS, episode_filter_for_split
+from eval.viz.rollout import run_dynamics_rollout_eval, run_dynamics_rollout_video
 
 
 def _load_rollout_batch_from_picked(
@@ -173,7 +136,7 @@ def _load_rollout_batch(
         if returns is None:
             _, returns = episode_cumulative_returns(cfg.data.path)
         if episode_filter is None:
-            episode_filter = _episode_filter_for_split(cfg, split)
+            episode_filter = episode_filter_for_split(cfg, split)
         low = float(min_return if min_return is not None else 0.0)
         high = float(max_return) if max_return is not None else None
         picked = select_episodes_by_return(
@@ -194,7 +157,7 @@ def _load_rollout_batch(
     window_mode = str(cfg.data.get("window_mode", "transition"))
     if split not in ("train", "val"):
         raise ValueError(f"default batch loader requires split train|val, got {split!r}")
-    episode_indices = list(_episode_filter_for_split(cfg, split) or [])
+    episode_indices = list(episode_filter_for_split(cfg, split) or [])
     effective_seq_len = int(seq_len if seq_len is not None else cfg.data.seq_len)
     ds = GranularEpisodeDataset(
         cfg.data.path,
@@ -234,7 +197,7 @@ def _dynamics_model_cfg(cfg: DictConfig) -> tuple[dict[str, Any], int, str]:
 def _build_models(cfg: DictConfig, dynamics_ckpt: Path, device: torch.device):
     tokenizer = build_tokenizer(cfg.model.tokenizer)
     if cfg.get("tokenizer_ckpt"):
-        _load_state(tokenizer, cfg.tokenizer_ckpt, prefix="model.")
+        load_state(tokenizer, cfg.tokenizer_ckpt, prefix="model.")
     tokenizer.eval()
     for p in tokenizer.parameters():
         p.requires_grad_(False)
@@ -248,7 +211,7 @@ def _build_models(cfg: DictConfig, dynamics_ckpt: Path, device: torch.device):
     channels = int(cfg.model.tokenizer.channels)
 
     dynamics = DynamicsModel(dyn_cfg, n_latents=n_latents, latent_dim=latent_dim)
-    _load_state(dynamics, str(dynamics_ckpt), prefix=ckpt_prefix)
+    load_state(dynamics, str(dynamics_ckpt), prefix=ckpt_prefix)
     dynamics.eval()
     dynamics.to(device)
     tokenizer.to(device)
@@ -275,7 +238,7 @@ def _write_rollout_videos(
     annotate_steps: bool = False,
     names: list[str] | None = None,
 ) -> None:
-    from dreamer4.video_utils import annotate_frames_uint8
+    from eval.viz.annotate import annotate_frames_uint8
 
     out_dir.mkdir(parents=True, exist_ok=True)
     for i, (pred, compare) in enumerate(zip(pred_videos, compare_videos)):
@@ -395,7 +358,7 @@ def _run_reward_bands(
     device: torch.device,
 ) -> None:
     _, returns = episode_cumulative_returns(cfg.data.path)
-    episode_filter = _episode_filter_for_split(cfg, split)
+    episode_filter = episode_filter_for_split(cfg, split)
     population = reward_band_counts(returns, bands)
 
     dynamics, tokenizer, rollout_kw = _build_models(cfg, dynamics_ckpt, device)
@@ -475,24 +438,24 @@ def main() -> None:
         epilog="""
 Examples:
   # Val split, static panels + metrics (uses train.rollout_ctx / rollout_horizon)
-  python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yaml \\
+  python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \\
     --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \\
     --out-dir logs/walker_walk/dynamics/rollout_eval --split val
 
   # Long rollout videos: context=obs[0], sliding attention after L frames
-  python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yaml \\
+  python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \\
     --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \\
     --out-dir logs/walker_walk/dynamics/rollout_videos \\
     --rollout-video --rollout-length 64 --attn-window 8 --video-fps 15
 
   # Rollout on high-return episodes only
-  python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yaml \\
+  python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \\
     --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \\
     --out-dir logs/walker_walk/dynamics/rollout_expert \\
     --min-episode-return 970 --max-items 2
 
   # Per reward band (fallen / weak / expert, ...)
-  python -m dreamer4.eval_dynamics_rollout configs/walker_walk/dynamics.yaml \\
+  python -m eval.dynamics_rollout configs/walker_walk/dynamics.yaml \\
     --dynamics-ckpt logs/walker_walk/dynamics/checkpoints/last.ckpt \\
     --out-dir logs/walker_walk/dynamics/rollout_bands --by-reward-bands
 """,

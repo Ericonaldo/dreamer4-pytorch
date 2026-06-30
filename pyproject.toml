@@ -5,7 +5,6 @@ description = "Minimal PyTorch Lightning implementation of Dreamer 4"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "einops>=0.8.0",
     "granular",
     "imageio>=2.37.0",
     "lightning>=2.4.0",
@@ -21,17 +20,15 @@ dev = ["ruff>=0.8.0"]
 lpips = ["lpips>=0.1.4"]
 dmc = [
     "dm-control>=1.0.14",
-    "elements>=3.17.0",
     "imageio-ffmpeg>=0.5.0",
-    "portal>=3.8.0",
 ]
 
 [dependency-groups]
 dev = ["ruff>=0.8.0"]
 
 [project.scripts]
-dreamer4-train = "dreamer4.cli:main"
-dreamer4-eval = "dreamer4.eval_policy:main"
+dreamer4-train = "dreamer4.train:main"
+dreamer4-eval = "eval.policy:main"
 
 [build-system]
 requires = ["setuptools>=75.0"]
@@ -39,7 +36,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["dreamer4*"]
+include = ["dreamer4*", "eval*"]
 
 [tool.uv]
 default-groups = []
