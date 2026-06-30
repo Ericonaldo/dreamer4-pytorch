@@ -6,7 +6,7 @@ import torch
 from lightning.pytorch.utilities import rank_zero_warn
 from omegaconf import DictConfig
 
-from dreamer4.callbacks import AsyncBCEval
+from dreamer4.callbacks import AsyncPolicyEval
 from dreamer4.data import align_dynamics_batch
 from dreamer4.checkpoint import load_state
 from dreamer4.modules.base import BaseModule
@@ -25,7 +25,7 @@ class BCDynamicsModule(BaseModule):
         self._pack = pack_bottleneck_to_spatial
         self._bc_loss = bc_loss
         self._flow_matching_loss = flow_matching_loss
-        self._env_eval = AsyncBCEval()
+        self._env_eval = AsyncPolicyEval()
 
         self.tokenizer = build_tokenizer(cfg.model.tokenizer)
         if cfg.get("tokenizer_ckpt"):

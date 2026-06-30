@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
 
-from dreamer4.agent import BCPolicy, load_bc_modules, resolve_eval_action_horizon
+from dreamer4.agent import DreamerAgent, load_policy_modules, resolve_eval_action_horizon
 from dreamer4.env import make_dmc_env
 from dreamer4.models.dynamics import (
     decode_packed_to_images,
@@ -29,6 +29,8 @@ from dreamer4.models.dynamics import (
 
 @dataclass
 class DynamicsRolloutResult:
+    """Offline dynamics rollout: scalar metrics plus decoded GT/pred frames."""
+
     metrics: dict[str, float]
     frames: torch.Tensor
     pred_frames: torch.Tensor
@@ -38,6 +40,8 @@ class DynamicsRolloutResult:
 
 @dataclass
 class DynamicsRolloutVideoResult:
+    """Long-horizon dynamics rollout for video export."""
+
     metrics: dict[str, float]
     gt_frames: torch.Tensor
     pred_frames: torch.Tensor
@@ -50,6 +54,7 @@ def _rollout_metrics(
     *,
     extra: dict[str, float] | None = None,
 ) -> dict[str, float]:
+    """MSE/PSNR vs GT and vs hold-last-frame baseline."""
     mse_pred = (pred_h.float() - gt_h.float()).pow(2).mean()
     mse_floor = (floor_h.float() - gt_h.float()).pow(2).mean()
     psnr_pred = 10.0 * torch.log10(1.0 / mse_pred.clamp_min(1e-12))
@@ -225,11 +230,12 @@ def dynamics_rollout_video(
 
 
 # ---------------------------------------------------------------------------
-# Online env eval — real DMC rollouts with BC policy (metrics, optional frames)
+# Online env eval — real DMC rollouts with DreamerAgent (metrics, optional frames)
 # ---------------------------------------------------------------------------
 
 
 def make_eval_env(cfg: DictConfig):
+    """Build a DMC env from ``cfg.eval`` (task, image size, action repeat, etc.)."""
     eval_cfg = cfg.get("eval", {})
     return make_dmc_env(
         str(eval_cfg.get("task", "walker_walk")),
@@ -244,23 +250,14 @@ def make_eval_env(cfg: DictConfig):
 
 @dataclass
 class EpisodeStats:
+    """One completed online env episode."""
+
     return_: float
     length: int
 
 
-class RandomPolicy:
-    def __init__(self, action_dim: int = 6):
-        self.action_dim = int(action_dim)
-
-    def reset(self, ids: list[int] | None = None) -> None:
-        return
-
-    def act(self, image_uint8: np.ndarray, ids: list[int] | None = None) -> np.ndarray:
-        del image_uint8, ids
-        return np.random.uniform(-1.0, 1.0, size=(self.action_dim,)).astype(np.float32)
-
-
 def run_episodes(env, policy, num_episodes: int) -> list[EpisodeStats]:
+    """Single-process, single-env eval loop for any policy with ``reset`` / ``act(image)``."""
     stats: list[EpisodeStats] = []
     for _ in range(num_episodes):
         policy.reset()
@@ -279,6 +276,7 @@ def run_episodes(env, policy, num_episodes: int) -> list[EpisodeStats]:
 
 
 def summarize_episodes(stats: list[EpisodeStats]) -> dict[str, float]:
+    """Aggregate return/length mean, std, min, max over ``EpisodeStats``."""
     returns = np.array([s.return_ for s in stats], dtype=np.float64)
     lengths = np.array([s.length for s in stats], dtype=np.float64)
     return {
@@ -295,6 +293,7 @@ def summarize_episodes(stats: list[EpisodeStats]) -> dict[str, float]:
 
 
 def _split_episodes(total: int, n: int) -> list[int]:
+    """Split ``total`` episodes as evenly as possible across ``n`` workers."""
     n = max(1, n)
     base, rem = divmod(total, n)
     return [base + (1 if i < rem else 0) for i in range(n)]
@@ -308,13 +307,14 @@ def _rollout_on_device(
     model_state: dict[str, torch.Tensor] | None = None,
     tokenizer_state: dict[str, torch.Tensor] | None = None,
 ) -> list[EpisodeStats]:
+    """Run ``num_episodes`` BC policy rollouts on one device with batched envs."""
     eval_cfg = cfg.get("eval", {})
     num_envs = min(int(eval_cfg.get("num_envs", 4)), num_episodes)
     envs = [make_eval_env(cfg) for _ in range(num_envs)]
-    model, tokenizer = load_bc_modules(
+    model, tokenizer = load_policy_modules(
         cfg, device, model_state=model_state, tokenizer_state=tokenizer_state
     )
-    policy = BCPolicy(cfg, device, model=model, tokenizer=tokenizer, num_envs=num_envs)
+    policy = DreamerAgent(cfg, device, model=model, tokenizer=tokenizer, num_envs=num_envs)
 
     stats: list[EpisodeStats] = []
     obs = [env.reset() for env in envs]
@@ -364,6 +364,7 @@ def _worker(
     tokenizer_state: dict[str, torch.Tensor] | None,
     out_queue,
 ) -> None:
+    """Multiprocessing worker: rollout on one GPU and push stats to ``out_queue``."""
     os.environ.setdefault("MUJOCO_GL", "egl")
     cfg = OmegaConf.create(cfg_dict)
     if gpu_id is not None and torch.cuda.is_available():
@@ -382,6 +383,7 @@ def _worker(
 
 
 def parse_eval_gpu_ids(raw: Any) -> list[int | None]:
+    """Parse ``eval.gpu_ids``: ``None``/``"all"``/int/list → CUDA device ids (or ``[None]`` on CPU)."""
     if raw is None:
         if torch.cuda.is_available():
             return list(range(torch.cuda.device_count()))
@@ -399,12 +401,13 @@ def parse_eval_gpu_ids(raw: Any) -> list[int | None]:
 
 
 def resolve_async_gpu_ids(cfg: DictConfig) -> list[int | None]:
+    """GPU ids for async training-time eval (``async_gpu_ids``, else ``gpu_ids``)."""
     eval_cfg = cfg.get("eval", {})
     raw = eval_cfg.get("async_gpu_ids", eval_cfg.get("gpu_ids", "all"))
     return parse_eval_gpu_ids(raw)
 
 
-def run_bc_env_eval(
+def run_policy_env_eval(
     cfg: DictConfig,
     *,
     num_episodes: int | None = None,
@@ -412,6 +415,7 @@ def run_bc_env_eval(
     tokenizer_state: dict[str, torch.Tensor] | None = None,
     gpu_ids: list[int] | None = None,
 ) -> dict[str, float]:
+    """Online BC policy eval; multi-GPU via spawn when ``len(gpu_ids) > 1``."""
     episodes = int(num_episodes or cfg.get("eval", {}).get("episodes", 10))
     action_horizon = resolve_eval_action_horizon(cfg)
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
@@ -461,24 +465,24 @@ def run_bc_env_eval(
     return metrics
 
 
-def run_bc_policy_episode(
+def run_policy_episode(
     cfg: DictConfig,
     device: torch.device,
     *,
     model_state: dict[str, torch.Tensor] | None = None,
     tokenizer_state: dict[str, torch.Tensor] | None = None,
 ) -> tuple[np.ndarray, float, int]:
-    """Run one BC env episode; returns (T,H,W,C) uint8 frames, return, length."""
+    """Run one policy env episode; returns (T,H,W,C) uint8 frames, return, length."""
     os.environ.setdefault("MUJOCO_GL", "egl")
     env = make_eval_env(cfg)
 
     if model_state is not None or tokenizer_state is not None:
-        model, tokenizer = load_bc_modules(
+        model, tokenizer = load_policy_modules(
             cfg, device, model_state=model_state, tokenizer_state=tokenizer_state
         )
-        policy = BCPolicy(cfg, device, model=model, tokenizer=tokenizer)
+        policy = DreamerAgent(cfg, device, model=model, tokenizer=tokenizer)
     else:
-        policy = BCPolicy(cfg, device)
+        policy = DreamerAgent(cfg, device)
 
     policy.reset()
     obs = env.reset()

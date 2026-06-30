@@ -1,4 +1,4 @@
-"""Training callbacks for validation."""
+"""Optional training callbacks and visualization helpers."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from lightning.pytorch.utilities import rank_zero_warn
 from multiprocessing import Process, get_context
 from omegaconf import DictConfig, OmegaConf
 
-from dreamer4.eval_utils import DynamicsRolloutResult, resolve_async_gpu_ids, run_bc_env_eval
+from dreamer4.eval_utils import DynamicsRolloutResult, resolve_async_gpu_ids, run_policy_env_eval
 
 
 def _checkpoint_step(path: Path) -> int:
@@ -101,16 +101,16 @@ def _async_entry(
     gpu_ids: list[int | None],
     out_queue,
 ) -> None:
-    """Child-process entry for async BC env eval (spawn target for ``AsyncBCEval.start``).
+    """Child-process entry for async policy env eval (spawn target for ``AsyncPolicyEval.start``).
 
-    Runs ``run_bc_env_eval`` in an isolated process so MuJoCo/DMC do not block training.
+    Runs ``run_policy_env_eval`` in an isolated process so MuJoCo/DMC do not block training.
     Writes ``run_dir/eval/env_step_{step:08d}.json`` and sends ``(step, metrics, err)``
     to *out_queue* on completion or failure.
     """
     os.environ.setdefault("MUJOCO_GL", "egl")
     try:
         cfg = OmegaConf.create(cfg_dict)
-        metrics = run_bc_env_eval(
+        metrics = run_policy_env_eval(
             cfg,
             model_state=model_state,
             tokenizer_state=tokenizer_state,
@@ -125,10 +125,11 @@ def _async_entry(
         out_queue.put((step, {}, str(exc)))
 
 
-class AsyncBCEval:
-    """Non-blocking BC env eval for training (rank 0 only).
+class AsyncPolicyEval:
+    """Non-blocking policy env eval for training (rank 0 only).
 
     Spawns a separate process to roll out the policy in DMC while training continues.
+    Used by both BC and RL Lightning modules.
     Typical usage from a Lightning module:
 
     - ``on_validation_epoch_end`` → ``start(...)``

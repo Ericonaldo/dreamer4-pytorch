@@ -11,19 +11,15 @@ import torch
 from omegaconf import OmegaConf
 
 from dreamer4.config import load_config
-from dreamer4.env import make_dmc_env
 from dreamer4.eval_utils import (
-    RandomPolicy,
     parse_eval_gpu_ids,
-    run_bc_env_eval,
-    run_bc_policy_episode,
-    run_episodes,
-    summarize_episodes,
+    run_policy_env_eval,
+    run_policy_episode,
 )
 from eval.viz.annotate import annotate_frames_uint8
 
 
-def run_bc_policy_video(
+def run_policy_video(
     cfg,
     out_path: Path,
     *,
@@ -37,7 +33,7 @@ def run_bc_policy_video(
     else:
         device = torch.device("cpu")
 
-    frames_arr, ep_return, ep_len = run_bc_policy_episode(cfg, device)
+    frames_arr, ep_return, ep_len = run_policy_episode(cfg, device)
     if annotate_steps:
         labels = [f"step {t}" for t in range(len(frames_arr))]
         labels[-1] = f"step {len(frames_arr) - 1}  return {ep_return:.0f}"
@@ -57,7 +53,6 @@ def run_bc_policy_video(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate policy in DMC Walker Walk")
     parser.add_argument("config", type=Path, help="BC or policy YAML config")
-    parser.add_argument("--policy", choices=["random", "bc"], default="random")
     parser.add_argument("--bc-ckpt", type=Path, default=None, help="BC Lightning checkpoint")
     parser.add_argument("--episodes", type=int, default=None)
     parser.add_argument("--gpus", type=int, default=None, help="Number of GPUs for BC eval")
@@ -95,18 +90,16 @@ def main() -> None:
     episodes = int(args.episodes or eval_cfg.get("episodes", 10))
     task = str(eval_cfg.get("task", "walker_walk"))
 
-    metrics: dict = {"policy": args.policy, "task": task}
+    metrics: dict = {"policy": "bc", "task": task}
 
     if args.video_out is not None:
-        if args.policy != "bc":
-            raise ValueError("--video-out requires --policy bc")
         if not cfg.get("bc_ckpt"):
             raise ValueError("BC video requires bc_ckpt in config or --bc-ckpt")
         gpu_id = 0 if torch.cuda.is_available() else None
         if args.gpus is not None:
             gpu_id = 0
         metrics.update(
-            run_bc_policy_video(
+            run_policy_video(
                 cfg,
                 args.video_out,
                 fps=int(args.video_fps),
@@ -115,25 +108,12 @@ def main() -> None:
             )
         )
 
-    if args.policy == "random":
-        env = make_dmc_env(
-            task,
-            repeat=int(eval_cfg.get("action_repeat", 1)),
-            image_size=int(eval_cfg.get("image_size", 64)),
-            proprio=bool(eval_cfg.get("proprio", False)),
-            image=bool(eval_cfg.get("image", True)),
-            camera=int(eval_cfg.get("camera_id", -1)),
-            max_episode_steps=int(eval_cfg.get("max_episode_steps", 1000)),
-        )
-        policy = RandomPolicy(action_dim=env.action_dim)
-        metrics.update(summarize_episodes(run_episodes(env, policy, episodes)))
-    else:
-        if not cfg.get("bc_ckpt"):
-            raise ValueError("BC eval requires bc_ckpt in config or --bc-ckpt")
-        gpu_ids = parse_eval_gpu_ids(eval_cfg.get("gpu_ids", "all"))
-        if args.gpus is not None:
-            gpu_ids = list(range(args.gpus))
-        metrics.update(run_bc_env_eval(cfg, num_episodes=episodes, gpu_ids=gpu_ids))
+    if not cfg.get("bc_ckpt"):
+        raise ValueError("BC eval requires bc_ckpt in config or --bc-ckpt")
+    gpu_ids = parse_eval_gpu_ids(eval_cfg.get("gpu_ids", "all"))
+    if args.gpus is not None:
+        gpu_ids = list(range(args.gpus))
+    metrics.update(run_policy_env_eval(cfg, num_episodes=episodes, gpu_ids=gpu_ids))
 
     print(json.dumps(metrics, indent=2))
     if args.out is not None:

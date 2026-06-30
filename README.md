@@ -155,7 +155,7 @@ Paper baseline: *pre-layer RMSNorm, RoPE, SwiGLU, QKNorm, attention logit soft c
 ### Data & infra
 
 - [ ] `data.obs_mode=proprio` / `both` paths through dynamics & policy (tokenizer is image-only today)
-- [x] DMC online env eval (`env.py` + `agent.py`; CLI `dreamer4-eval`, training `AsyncBCEval`)
+- [x] DMC online env eval (`env.py` + `agent.py`; CLI `dreamer4-eval`, training `AsyncPolicyEval`)
 
 ## Setup
 
@@ -307,7 +307,7 @@ uv run python -m eval.dynamics_rollout configs/walker_walk/bc_dynamics.yaml \
 
 ### BC policy eval (online DMC)
 
-CLI: `dreamer4-eval` (`eval/policy.py`) — thin wrapper over `dreamer4/agent.py` and `dreamer4/eval_utils.py` (`BCPolicy`, `run_bc_env_eval`, `AsyncBCEval`). When the training YAML lives in `configs/walker_walk/`, merges `policy_eval.yaml` underneath it for heavier offline eval defaults (`episodes: 50`, `num_envs: 8`; training yaml `eval.episodes` is typically smaller). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan + forward every env step); **L>1** = forward once then execute MTP slots `1..L` without re-forwarding, but still **encode every env frame** and commit actions into `(z, a)` history (capped by `model.action_horizon - 1`). Regenerate horizon sweep charts with `python -m dreamer4.plot_action_horizon_eval`.
+CLI: `dreamer4-eval` (`eval/policy.py`) — thin wrapper over `dreamer4/agent.py` and `dreamer4/eval_utils.py` (`DreamerAgent`, `run_policy_env_eval`, `AsyncPolicyEval`). When the training YAML lives in `configs/walker_walk/`, merges `policy_eval.yaml` underneath it for heavier offline eval defaults (`episodes: 50`, `num_envs: 8`; training yaml `eval.episodes` is typically smaller). `eval.action_horizon` (default **1**) controls open-loop eval: **1** = closed-loop (replan + forward every env step); **L>1** = forward once then execute MTP slots `1..L` without re-forwarding, but still **encode every env frame** and commit actions into `(z, a)` history (capped by `model.action_horizon - 1`). Regenerate horizon sweep charts with `python -m dreamer4.plot_action_horizon_eval`.
 
 **Multi-GPU**: `--gpus 8` splits 50 episodes across 8 GPUs; each GPU runs `eval.num_envs` parallel envs (8 in `policy_eval.yaml`).
 
@@ -318,12 +318,12 @@ CKPT=logs/walker_walk/bc_dynamics_10m/checkpoints/step-step=50000.ckpt
 CFG=configs/walker_walk/bc_dynamics.yaml
 
 # 50 episodes, 8 GPUs × 8 envs per GPU
-uv run dreamer4-eval $CFG --policy bc --bc-ckpt $CKPT \
+uv run dreamer4-eval $CFG --bc-ckpt $CKPT \
   --episodes 50 --gpus 8 \
   --out logs/walker_walk/bc_dynamics_10m/eval/env_step_50000.json
 
 # Annotated policy eval video
-uv run dreamer4-eval $CFG --policy bc --bc-ckpt $CKPT \
+uv run dreamer4-eval $CFG --bc-ckpt $CKPT \
   --video-out logs/walker_walk/bc_dynamics_10m/eval/policy_video_step50000.mp4 \
   --annotate-video --video-fps 20
 ```
@@ -382,10 +382,10 @@ dreamer4/
     tokenizer.py
     bc_dynamics.py
     rl.py
-  agent.py            # BCPolicy, load_bc_modules (online inference)
+  agent.py            # DreamerAgent, load_policy_modules (online inference)
   env.py              # DMC environment
-  eval_utils.py       # Eval rollouts: dynamics (offline) + BC policy (online DMC)
-  callbacks.py        # Lightning callbacks, AsyncBCEval, val panel logging
+  eval_utils.py       # Eval rollouts: dynamics (offline) + policy (online DMC)
+  callbacks.py        # Lightning callbacks, AsyncPolicyEval, val panel logging
   train.py            # Trainer, dataloaders, dreamer4-train entry
 eval/                 # Standalone eval scripts + viz
   common.py
