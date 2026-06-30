@@ -18,7 +18,6 @@ from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities import rank_zero_warn
 from multiprocessing import Process, get_context
 from omegaconf import DictConfig, OmegaConf
-from torch.utils.data import DataLoader
 
 from dreamer4.eval_utils import DynamicsRolloutResult, resolve_async_gpu_ids, run_bc_env_eval
 
@@ -37,36 +36,6 @@ def _checkpoint_step(path: Path) -> int:
     if "-v" in tail:
         tail = tail.split("-v", 1)[0]
     return int(tail) if tail.isdigit() else 0
-
-
-class ValidateEveryNSteps(Callback):
-    """Run validation every N optimizer steps (works with DDP and small epoch sizes)."""
-
-    def __init__(self, every_n_steps: int, limit_batches: int, val_dataloader: DataLoader):
-        self.every_n_steps = every_n_steps
-        self.limit_batches = limit_batches
-        self.val_dataloader = val_dataloader
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
-        step = trainer.global_step
-        warmup = int(getattr(pl_module, "policy_warmup_steps", 0))
-        if warmup > 0 and step == warmup:
-            return
-        if step > 0 and step % self.every_n_steps == 0:
-            trainer.strategy.barrier()
-            pl_module.eval()
-            n_batches = max(1, min(len(self.val_dataloader), self.limit_batches))
-            pl_module._val_n_batches = n_batches
-            with torch.no_grad():
-                for i, val_batch in enumerate(self.val_dataloader):
-                    if i >= self.limit_batches:
-                        break
-                    val_batch = trainer.strategy.batch_to_device(val_batch)
-                    pl_module.validation_step(val_batch, i)
-            pl_module.on_validation_epoch_end()
-            pl_module._val_n_batches = None
-            pl_module.train()
-            trainer.strategy.barrier()
 
 
 class SaveCheckpointAfterPolicyWarmup(Callback):

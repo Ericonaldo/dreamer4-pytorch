@@ -8,8 +8,8 @@ data:
   val_fraction: 0.05
   val_seed: 0
 
-# Must match tokenizer.yaml arch (frozen encode only; default log run_name: walker_walk/tokenizer_5m).
-tokenizer_ckpt: logs/walker_walk/tokenizer_5m/checkpoints/step-step=20000.ckpt
+# Must match tokenizer.yaml arch (frozen encode only; default log run_name: walker_walk/tokenizer).
+tokenizer_ckpt: logs/walker_walk/tokenizer/checkpoints/step-step=20000.ckpt
 
 model:
   tokenizer:

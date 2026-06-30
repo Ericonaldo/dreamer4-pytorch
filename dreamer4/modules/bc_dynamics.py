@@ -61,22 +61,6 @@ class BCDynamicsModule(BaseModule):
         self.rollout_flow_steps = int(cfg.train.get("rollout_flow_steps", 8))
         self._val_rollout_batch: tuple[torch.Tensor, torch.Tensor] | None = None
         self._val_rollout_viz_idx: int | None = None
-        self._val_rollout_n_batches: int | None = None
-
-    def _num_val_batches(self) -> int:
-        limit = int(self.cfg.train.get("val_max_batches", 32))
-        if self._val_rollout_n_batches is not None:
-            return self._val_rollout_n_batches
-        loader = self.trainer.val_dataloaders
-        if loader is None:
-            return max(1, limit)
-        if isinstance(loader, (list, tuple)):
-            loader = loader[0]
-        try:
-            n = len(loader)
-        except TypeError:
-            n = limit
-        return max(1, min(n, limit))
 
     def _encode_packed(self, image_bthwc: torch.Tensor) -> torch.Tensor:
         z = self.tokenizer.encode_images(image_bthwc)
@@ -112,12 +96,12 @@ class BCDynamicsModule(BaseModule):
         bc_prefix = "bc" if stage == "train" else "val"
         for key, value in flow_metrics.items():
             prog = stage == "train" and key == "flow_mse"
-            self.log(f"{dyn_prefix}/{key}", value, prog_bar=prog, sync_dist=True)
+            self.log(f"{dyn_prefix}/{key}", value, prog_bar=prog, sync_dist=stage == "train")
         for key, value in bc_metrics.items():
             prog = stage == "train" and key in ("action_nll", "action_mse", "action_out_mean")
-            self.log(f"{bc_prefix}/{key}", value, prog_bar=prog, sync_dist=True)
+            self.log(f"{bc_prefix}/{key}", value, prog_bar=prog, sync_dist=stage == "train")
         if stage == "val":
-            self.log(f"{self.stage}/loss", loss, sync_dist=True)
+            self.log(f"{self.stage}/loss", loss, sync_dist=False)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -152,7 +136,6 @@ class BCDynamicsModule(BaseModule):
             image, action = self._val_rollout_batch
             self._val_rollout_batch = None
             self._val_rollout_viz_idx = None
-            self._val_rollout_n_batches = None
 
             max_items = int(self.cfg.log.get("viz_max_items", 4))
             result = dynamics_rollout_eval(
