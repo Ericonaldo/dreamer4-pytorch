@@ -67,7 +67,7 @@ train:
   reward_weight: 0.1
   rollout_ctx: 8
   rollout_horizon: 8
-  rollout_flow_steps: 8
+  rollout_flow_steps: 4
   devices: 8
   accelerator: gpu
   precision: bf16-mixed

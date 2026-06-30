@@ -57,7 +57,7 @@ model:
 
 imagination:
   horizon: 8
-  flow_steps: 8
+  flow_steps: 4
   context_len_min: 8
   gamma: 0.997
   lambda_: 0.95

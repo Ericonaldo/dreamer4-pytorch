@@ -1,4 +1,4 @@
-"""Evaluation utilities: offline dynamics rollout and online DMC policy rollouts."""
+"""Evaluation utilities: offline dynamics rollout and online DMC policy rollouts. Used for training time validation and offline eval."""
 
 from __future__ import annotations
 

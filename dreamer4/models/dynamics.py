@@ -58,10 +58,10 @@ def _sample_tau_for_step(
     """Sample signal level tau and discrete signal index on the flow grid for step_idx."""
     K = (1 << step_idx).to(torch.long)
     u = torch.rand((B, T), device=device, dtype=torch.float32)
-    j_idx = torch.floor(u * K.to(torch.float32)).to(torch.long)
-    tau = j_idx.to(torch.float32) / K.to(torch.float32)
+    j_idx = torch.floor(u * K.to(torch.float32)).to(torch.long) # index of tau on the corresponding coarse grid
+    tau = j_idx.to(torch.float32) / K.to(torch.float32) # tau ∈ [0, 1]
     scale = torch.div(torch.tensor(k_max, device=device), K, rounding_mode="floor")
-    tau_idx = j_idx * scale
+    tau_idx = j_idx * scale # compute the index of tau on the corresponding fine grid
     return tau, tau_idx
 
 
@@ -99,15 +99,18 @@ def shortcut_forcing_loss(
     """
     device = z1.device
     B, T = z1.shape[:2]
-    B_self = max(0, min(int(B_self), B - 1))
+    if global_step < bootstrap_start:
+        B_self = 0
+    else:
+        B_self = max(0, min(int(B_self), B - 1))
     B_emp = B - B_self
     emax = _emax_from_kmax(k_max)
 
-    step_idx_emp = torch.full((B_emp, T), emax, device=device, dtype=torch.long)
-    d_self = torch.zeros((0, T), device=device, dtype=torch.float32)
-    step_idx_self = torch.zeros((0, T), device=device, dtype=torch.long)
+    step_idx_emp = torch.full((B_emp, T), emax, device=device, dtype=torch.long) # B_emp uses finest step
+    d_self = torch.zeros((0, T), device=device, dtype=torch.float32) # d_self ∈ [0, 1]
+    step_idx_self = torch.zeros((0, T), device=device, dtype=torch.long) # step_idx_self ∈ [0, emax-1]
     if B_self > 0:
-        d_self, step_idx_self = _sample_step_excluding_dmin(device, B_self, T, k_max)
+        d_self, step_idx_self = _sample_step_excluding_dmin(device, B_self, T, k_max) # step_idx_self ∈ [0, emax-1]
         step_idx_full = torch.cat([step_idx_emp, step_idx_self], dim=0)
     else:
         step_idx_full = step_idx_emp
@@ -126,7 +129,7 @@ def shortcut_forcing_loss(
 
     z1_hat_full, _ = model(
         actions, step_idx_full, sigma_idx_full, z_tilde_full, space_mode=space_mode
-    )
+    ) # directly predict the next step (full step, no half)
     z1_hat_emp = z1_hat_full[:B_emp]
     z1_hat_self = z1_hat_full[B_emp:]
 
@@ -136,20 +139,20 @@ def shortcut_forcing_loss(
     boot_mse = torch.zeros((), device=device, dtype=torch.float32)
     loss_self = torch.zeros((), device=device, dtype=torch.float32)
 
-    if B_self > 0 and global_step >= bootstrap_start:
-        d_half = d_self / 2.0
-        step_idx_half = step_idx_self + 1
-        sigma_plus = sigma_self + d_half
+    if B_self > 0:
+        d_half = d_self / 2.0 # half step model
+        step_idx_half = step_idx_self + 1 # d = 1 / 2^(step_idx_half)
+        sigma_plus = sigma_self + d_half # progress towards the next step
         sigma_idx_plus = sigma_idx_self + (k_max * d_half).to(torch.long)
 
         actions_self = actions[B_emp:]
         z1_hat_half1, _ = model(
             actions_self, step_idx_half, sigma_idx_self, z_tilde_self, space_mode=space_mode
-        )
+        ) # current step predict half step forward
         b_prime = (z1_hat_half1.float() - z_tilde_self.float()) / (
             1.0 - sigma_self
-        ).clamp_min(1e-6)[..., None, None]
-        z_prime = z_tilde_self.float() + b_prime * d_half[..., None, None]
+        ).clamp_min(1e-6)[..., None, None] # velocity of the current step, v = (x1_hat - z_tilde) / (1 - sigma)
+        z_prime = z_tilde_self.float() + b_prime * d_half[..., None, None] # prediction of the next step
 
         z1_hat_half2, _ = model(
             actions_self,
@@ -157,17 +160,17 @@ def shortcut_forcing_loss(
             sigma_idx_plus,
             z_prime.to(z_tilde_self.dtype),
             space_mode=space_mode,
-        )
+        ) # the half step from z_prime, predict the next step
         b_doubleprime = (z1_hat_half2.float() - z_prime.float()) / (
             1.0 - sigma_plus
-        ).clamp_min(1e-6)[..., None, None]
+        ).clamp_min(1e-6)[..., None, None] # velocity for the second half
 
         vhat = (z1_hat_self.float() - z_tilde_self.float()) / (
             1.0 - sigma_self
-        ).clamp_min(1e-6)[..., None, None]
-        v_target = ((b_prime + b_doubleprime) / 2.0).detach()
+        ).clamp_min(1e-6)[..., None, None] # velocity of the full step (coarse one)
+        v_target = ((b_prime + b_doubleprime) / 2.0).detach() # average velocity of the two half steps as bootstrap target
 
-        boot_per = (1.0 - sigma_self).pow(2) * (vhat - v_target).pow(2).mean(dim=(2, 3))
+        boot_per = (1.0 - sigma_self).pow(2) * (vhat - v_target).pow(2).mean(dim=(2, 3)) # scale back to the x-space, cause v = (x1 - xt) / (1 - t)
         loss_self = (boot_per * w_self).mean()
         boot_mse = boot_per.mean()
 
@@ -260,8 +263,8 @@ class DynamicsModel(nn.Module):
             nn.Linear(action_hidden, self.d_model),
         )
 
-        self.step_embed = nn.Embedding(self.num_step_bins, self.d_model)
-        self.signal_embed = nn.Embedding(self.k_max + 1, self.d_model)
+        self.step_embed = nn.Embedding(self.num_step_bins, self.d_model) # how long I should move forward, towards the next step
+        self.signal_embed = nn.Embedding(self.k_max + 1, self.d_model) # where am I? current step
 
         segments = [
             (Modality.ACTION, 1),
