@@ -23,18 +23,11 @@ from dreamer4.eval_utils import DynamicsRolloutResult, resolve_async_gpu_ids, ru
 
 
 def _checkpoint_step(path: Path) -> int:
-    """Extract global step from Lightning checkpoint filename for sorting."""
+    """Extract global step from ``step-step=N.ckpt`` (``train.py`` ModelCheckpoint template)."""
     stem = path.stem
-    if stem.isdigit():
-        return int(stem)
-    if "-step=" in stem:
-        tail = stem.rsplit("=", 1)[-1]
-    elif stem.startswith("step-"):
-        tail = stem[5:]
-    else:
+    if not stem.startswith("step-step="):
         return 0
-    if "-v" in tail:
-        tail = tail.split("-v", 1)[0]
+    tail = stem.removeprefix("step-step=").partition("-v")[0]
     return int(tail) if tail.isdigit() else 0
 
 
@@ -86,8 +79,7 @@ class KeepLastCheckpoints(Callback):
                 self._prune()
 
     def _prune(self) -> None:
-        ckpts = [p for p in self.checkpoint_dir.glob("*.ckpt") if p.name != "last.ckpt"]
-        ckpts.sort(key=_checkpoint_step)
+        ckpts = sorted(self.checkpoint_dir.glob("step-step=*.ckpt"), key=_checkpoint_step)
         for path in ckpts[:-self.keep_last]:
             path.unlink(missing_ok=True)
 
