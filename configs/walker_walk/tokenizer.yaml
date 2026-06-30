@@ -32,10 +32,6 @@ train:
   checkpoint_keep_last: 5
   val_every: 100
   val_max_batches: 32
-  use_lpips: false
-  lpips_weight: 0.2
-  lpips_frac: 0.5
-  lpips_net: alex
   devices: 8
   accelerator: gpu
   precision: bf16-mixed

@@ -11,7 +11,6 @@ from dreamer4.checkpoint import load_state
 from dreamer4.models import PolicyModel, build_tokenizer
 from dreamer4.models.dynamics import pack_bottleneck_to_spatial
 from dreamer4.models.policy import POLICY_ENV_ACTION_SLOT
-from dreamer4.models.tokenizer import encode_images
 
 
 def load_bc_modules(
@@ -144,7 +143,7 @@ class BCPolicy:
             .div_(255.0)
             .unsqueeze(1)
         )
-        z = encode_images(self.tokenizer, imgs, self.patch_size)
+        z = self.tokenizer.encode_images(imgs)
         packed = pack_bottleneck_to_spatial(z, self.n_spatial, self.packing_factor)[:, 0]
         for j, i in enumerate(ids):
             self._z[i].append(packed[j])

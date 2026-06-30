@@ -20,7 +20,6 @@ from dreamer4.models.dynamics import (
     sample_autoregressive_packed_sequence,
     sample_sliding_window_rollout_packed_sequence,
 )
-from dreamer4.models.tokenizer import encode_images
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +95,7 @@ def dynamics_rollout_eval(
     frames = image_bthwc[:, :length]
     actions_eval = actions[:, :length]
 
-    z_btld = encode_images(tokenizer, frames, patch_size)
+    z_btld = tokenizer.encode_images(frames, patch_size)
     z_gt_packed = pack_bottleneck_to_spatial(z_btld, n_spatial, packing_factor)
 
     z_pred_packed = sample_autoregressive_packed_sequence(
@@ -188,7 +187,7 @@ def dynamics_rollout_video(
     actions_eval = actions[:, :total]
     B = min(frames.shape[0], max_items)
 
-    z_btld = encode_images(tokenizer, frames[:B], patch_size)
+    z_btld = tokenizer.encode_images(frames[:B], patch_size)
     z_gt_packed = pack_bottleneck_to_spatial(z_btld, n_spatial, packing_factor)
     z0 = z_gt_packed[:, 0]
 

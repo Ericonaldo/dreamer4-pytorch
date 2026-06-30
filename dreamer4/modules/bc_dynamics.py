@@ -21,10 +21,8 @@ class BCDynamicsModule(BaseModule):
         super().__init__(cfg)
         from dreamer4.models import PolicyModel, build_tokenizer, bc_loss
         from dreamer4.models.dynamics import flow_matching_loss, pack_bottleneck_to_spatial
-        from dreamer4.models.tokenizer import encode_images
 
         self._pack = pack_bottleneck_to_spatial
-        self._encode_images = encode_images
         self._bc_loss = bc_loss
         self._flow_matching_loss = flow_matching_loss
         self._env_eval = AsyncBCEval()
@@ -81,7 +79,7 @@ class BCDynamicsModule(BaseModule):
         return max(1, min(n, limit))
 
     def _encode_packed(self, image_bthwc: torch.Tensor) -> torch.Tensor:
-        z = self._encode_images(self.tokenizer, image_bthwc, self.patch_size)
+        z = self.tokenizer.encode_images(image_bthwc)
         return self._pack(z, self.n_spatial, self.packing_factor)
 
     def _shared_step(self, batch, stage: str) -> torch.Tensor:
