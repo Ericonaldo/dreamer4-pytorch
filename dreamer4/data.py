@@ -13,6 +13,22 @@ from torch.utils.data import Dataset
 CHUNK_SIZE = 100  # Granular shard size; global step i lives in chunk i // CHUNK_SIZE.
 
 
+def resolve_data_paths(data: Any) -> list[str]:
+    """Return Granular dataset directories from ``data.path`` or ``data.paths``."""
+    if isinstance(data, str):
+        return [data]
+    paths = data.get("paths") if hasattr(data, "get") else None
+    if paths is not None:
+        out = [str(p) for p in paths]
+        if not out:
+            raise ValueError("data.paths must be a non-empty list")
+        return out
+    path = data.get("path") if hasattr(data, "get") else None
+    if path is not None:
+        return [str(path)]
+    raise ValueError("data config needs 'path' (str) or 'paths' (list[str])")
+
+
 @dataclass
 class Batch:
     """Batched episode windows from ``collate_episodes`` (B, T, ...)."""
