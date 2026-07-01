@@ -50,18 +50,17 @@ class SaveCheckpointAfterPolicyWarmup(Callback):
         if step != self.warmup_steps:
             return
         self._saved = True
-        trainer.strategy.barrier()
+        path = self.checkpoint_dir / "warmup_end.ckpt"
         if trainer.is_global_zero:
             rank_zero_warn(f"Saving post-warmup checkpoint at step {step}...")
-            path = self.checkpoint_dir / "warmup_end.ckpt"
-            trainer.save_checkpoint(str(path))
+        # All DDP ranks must call save_checkpoint; rank 0 alone deadlocks in collectives.
+        trainer.save_checkpoint(str(path))
+        trainer.strategy.barrier()
+        if trainer.is_global_zero:
             rank_zero_warn(
                 f"Saved post-warmup checkpoint at step {step}: {path} "
                 f"(resume with train.resume_ckpt={path})"
             )
-        trainer.strategy.barrier()
-        if trainer.is_global_zero:
-            rank_zero_warn(f"Post-warmup checkpoint barrier done at step {step}; continuing training")
 
 
 class KeepLastCheckpoints(Callback):
