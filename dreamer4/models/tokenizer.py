@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import DictConfig
 
+from dreamer4.checkpoint import load_state
 from dreamer4.config import config_to_dict
 from dreamer4.models.transformer_blocks import (
     BlockCausalTransformer,
@@ -259,7 +260,11 @@ class Tokenizer(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def build_tokenizer(cfg: Mapping[str, Any] | DictConfig) -> Tokenizer:
+def build_tokenizer(
+    cfg: Mapping[str, Any] | DictConfig,
+    *,
+    ckpt: str | None = None,
+) -> Tokenizer:
     """Build Tokenizer from YAML `model` or `model.tokenizer` (OmegaConf dict)."""
     raw = config_to_dict(cfg)
     H = int(raw["image_size"])
@@ -308,4 +313,6 @@ def build_tokenizer(cfg: Mapping[str, Any] | DictConfig) -> Tokenizer:
     model = Tokenizer(enc, dec)
     model.patch_size = patch
     model._cfg = raw
+    if ckpt:
+        load_state(model, ckpt, prefix="model.")
     return model

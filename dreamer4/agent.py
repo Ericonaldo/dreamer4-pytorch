@@ -1,4 +1,4 @@
-"""Online policy inference (load checkpoint → act in env)."""
+"""Online policy inference and interact with environment (load checkpoint → act in env)."""
 
 from __future__ import annotations
 
@@ -7,8 +7,7 @@ import torch.nn as nn
 import numpy as np
 from omegaconf import DictConfig
 
-from dreamer4.checkpoint import load_state
-from dreamer4.models import PolicyModel, build_tokenizer
+from dreamer4.models import PolicyModel, build_policy, build_tokenizer
 from dreamer4.models.dynamics import pack_bottleneck_to_spatial
 from dreamer4.models.policy import POLICY_ENV_ACTION_SLOT
 
@@ -20,31 +19,19 @@ def load_policy_modules(
     model_state: dict[str, torch.Tensor] | None = None,
     tokenizer_state: dict[str, torch.Tensor] | None = None,
 ) -> tuple[PolicyModel, nn.Module]:
-    tokenizer = build_tokenizer(cfg.model.tokenizer)
+    tokenizer = None
     if tokenizer_state is not None:
+        tokenizer = build_tokenizer(cfg.model.tokenizer)
         tokenizer.load_state_dict(tokenizer_state, strict=True)
-    elif cfg.get("tokenizer_ckpt"):
-        load_state(tokenizer, cfg.tokenizer_ckpt, prefix="model.")
 
-    n_latents = tokenizer.encoder.n_latents
-    latent_dim = tokenizer.encoder.bottleneck_proj.out_features
-    model = PolicyModel(
-        cfg.model.dynamics,
-        n_latents=n_latents,
-        latent_dim=latent_dim,
-        heads_cfg=cfg.model,
+    tokenizer, model, _, _ = build_policy(
+        cfg,
+        tokenizer=tokenizer,
+        tokenizer_ckpt=cfg.get("tokenizer_ckpt") if tokenizer is None else None,
+        ckpt=cfg.get("bc_ckpt") if model_state is None else None,
     )
     if model_state is not None:
         model.load_state_dict(model_state, strict=False)
-    elif cfg.get("bc_ckpt"):
-        ckpt = torch.load(cfg.bc_ckpt, map_location="cpu", weights_only=False)
-        state = ckpt.get("state_dict", ckpt)
-        filtered = {
-            k.removeprefix("model."): v
-            for k, v in state.items()
-            if k.startswith("model.") and "attn_mask" not in k
-        }
-        model.load_state_dict(filtered, strict=False)
 
     tokenizer.eval()
     model.eval()

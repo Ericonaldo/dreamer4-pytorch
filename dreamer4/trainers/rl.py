@@ -1,104 +1,21 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 from omegaconf import DictConfig
 
 from dreamer4.callbacks import AsyncPolicyEval
-from dreamer4.checkpoint import load_state
 from dreamer4.data import align_dynamics_batch
-from dreamer4.models import build_tokenizer
-from dreamer4.models.dynamics import pack_bottleneck_to_spatial, sample_one_timestep_packed
+from dreamer4.models import build_policy
+from dreamer4.models.dynamics import pack_bottleneck_to_spatial
 from dreamer4.models.policy import (
-    POLICY_ENV_ACTION_SLOT,
-    PolicyModel,
-    SquashedGaussianHead,
     SymlogHead,
+    imagine_latent_rollout,
     imagination_rl_loss,
 )
 from dreamer4.trainers.base import BaseModule
-
-
-@dataclass
-class _ImaginationRollout:
-    hidden: torch.Tensor
-    actions: torch.Tensor
-    log_prob: torch.Tensor
-
-
-def _imagine_latent_rollout(
-    policy_model: PolicyModel,
-    dynamics: nn.Module,
-    packed_z_ctx: torch.Tensor,
-    actions_ctx: torch.Tensor,
-    policy: SquashedGaussianHead,
-    horizon: int,
-    flow_steps: int,
-    *,
-    bc_space_mode: str,
-    ctx_len: int | None = None,
-) -> _ImaginationRollout:
-    """Roll out H imagined steps in latent space with policy-sampled actions."""
-    ctx = packed_z_ctx.shape[1]
-    if ctx_len is not None and ctx_len < ctx:
-        z_sliding = packed_z_ctx[:, -ctx_len:]
-        a_sliding = actions_ctx[:, -ctx_len:]
-    else:
-        z_sliding = packed_z_ctx
-        a_sliding = actions_ctx
-        ctx_len = ctx
-
-    z_sliding = z_sliding.float()
-    a_sliding = a_sliding.float()
-
-    with torch.no_grad():
-        h_seq = policy_model.agent_hidden(z_sliding, a_sliding, space_mode=bc_space_mode)
-    h = h_seq[:, -1]
-
-    imagined_actions: list[torch.Tensor] = []
-    imagined_log_prob: list[torch.Tensor] = []
-    imagined_hidden: list[torch.Tensor] = [h]
-
-    for _ in range(horizon):
-        if not torch.isfinite(h).all():
-            raise RuntimeError("non-finite agent hidden before policy sample in imagination rollout")
-        h_in = h.unsqueeze(1)
-        # Sampling under no_grad; PMPO re-evaluates log_prob on fixed actions in imagination_rl_policy_loss.
-        with torch.no_grad():
-            action_mtp, log_p_mtp, _, _ = policy.sample(h_in)
-        slot = POLICY_ENV_ACTION_SLOT
-        action = action_mtp[:, 0, slot]
-        log_p = log_p_mtp[:, 0, slot]
-        imagined_actions.append(action)
-        imagined_log_prob.append(log_p)
-
-        actions_step = torch.cat([a_sliding, action.unsqueeze(1)], dim=1)
-        with torch.no_grad():
-            z_next = sample_one_timestep_packed(
-                dynamics,
-                z_sliding,
-                actions_step,
-                flow_steps,
-            )
-            z_sliding = torch.cat([z_sliding, z_next.unsqueeze(1)], dim=1)
-            if z_sliding.shape[1] > ctx_len:
-                z_sliding = z_sliding[:, -ctx_len:]
-            a_sliding = torch.cat([a_sliding, action.unsqueeze(1)], dim=1)
-            if a_sliding.shape[1] > ctx_len:
-                a_sliding = a_sliding[:, -ctx_len:]
-            h = policy_model.agent_hidden(z_sliding, a_sliding, space_mode=bc_space_mode)[:, -1]
-
-        imagined_hidden.append(h)
-
-    return _ImaginationRollout(
-        hidden=torch.stack(imagined_hidden, dim=1),
-        actions=torch.stack(imagined_actions, dim=1),
-        log_prob=torch.stack(imagined_log_prob, dim=1),
-    )
 
 
 class RLModule(BaseModule):
@@ -122,24 +39,11 @@ class RLModule(BaseModule):
         self.policy_warmup_steps = int(imag.get("policy_warmup_steps", 200))
         self._policy_lr = float(imag.get("policy_lr", cfg.train.optimizer.lr))
 
-        self.tokenizer = build_tokenizer(cfg.model.tokenizer)
-        if cfg.get("tokenizer_ckpt"):
-            load_state(self.tokenizer, cfg.tokenizer_ckpt, prefix="model.")
-        for p in self.tokenizer.parameters():
-            p.requires_grad_(False)
-
-        n_latents = self.tokenizer.encoder.n_latents
-        latent_dim = self.tokenizer.encoder.bottleneck_proj.out_features
-        self.packing_factor = int(cfg.model.dynamics.get("packing_factor", 1))
-        self.n_spatial = n_latents // self.packing_factor
-
-        self.model = PolicyModel(
-            cfg.model.dynamics,
-            n_latents=n_latents,
-            latent_dim=latent_dim,
-            heads_cfg=cfg.model,
+        self.tokenizer, self.model, self.n_spatial, self.packing_factor = build_policy(
+            cfg,
+            tokenizer_ckpt=cfg.get("tokenizer_ckpt"),
+            ckpt=cfg.get("bc_ckpt"),
         )
-        load_state(self.model, cfg.bc_ckpt, prefix="model.")
 
         for p in self.model.dynamics.parameters():
             p.requires_grad_(False)
@@ -159,7 +63,6 @@ class RLModule(BaseModule):
             layers=value_layers,
         )
 
-        self.bc_space_mode = self.model.bc_space_mode
         self._env_eval = AsyncPolicyEval()
 
     def configure_optimizers(self):
@@ -249,7 +152,7 @@ class RLModule(BaseModule):
                 self.tokenizer.encode_images(image_ctx), self.n_spatial, self.packing_factor
             )
 
-        rollout = _imagine_latent_rollout(
+        rollout = imagine_latent_rollout(
             self.model,
             self.model.dynamics,
             packed_z,
@@ -257,7 +160,6 @@ class RLModule(BaseModule):
             self.model.heads.policy,
             self.horizon,
             self.flow_steps,
-            bc_space_mode=self.bc_space_mode,
             ctx_len=ctx_len,
         )
         return rollout

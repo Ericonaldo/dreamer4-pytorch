@@ -30,9 +30,8 @@ from dreamer4.data import align_dynamics_batch
 from dreamer4.models.dynamics import (
     decode_packed_to_images,
     pack_bottleneck_to_spatial,
-    sample_one_timestep_packed,
 )
-from dreamer4.models.policy import POLICY_ENV_ACTION_SLOT
+from dreamer4.models.policy import imagine_latent_rollout
 from dreamer4.agent import load_policy_modules
 
 from eval.data_stats import episode_cumulative_returns, select_episodes_by_return
@@ -40,47 +39,6 @@ from eval.dynamics_rollout import _load_rollout_batch_from_picked
 from eval.viz.annotate import annotate_frames_uint8
 from eval.viz.panels import rollout_panels_multictx_uint8
 from eval.viz.rollout import stack_gt_pred_video_uint8
-
-
-def _collect_imagined_latents(
-    model,
-    dynamics,
-    packed_z_ctx: torch.Tensor,
-    actions_ctx: torch.Tensor,
-    policy,
-    horizon: int,
-    flow_steps: int,
-    *,
-    bc_space_mode: str,
-    ctx_len: int,
-) -> torch.Tensor:
-    """Run imagination rollout; return predicted latents (B, H, n_spatial, d_spatial)."""
-    z_sliding = packed_z_ctx[:, -ctx_len:].float()
-    a_sliding = actions_ctx[:, -ctx_len:].float()
-
-    with torch.no_grad():
-        h_seq = model.agent_hidden(z_sliding, a_sliding, space_mode=bc_space_mode)
-    h = h_seq[:, -1]
-
-    imagined_latents: list[torch.Tensor] = []
-    for _ in range(horizon):
-        h_in = h.unsqueeze(1)
-        with torch.no_grad():
-            action_mtp, _, _, _ = policy.sample(h_in)
-        action = action_mtp[:, 0, POLICY_ENV_ACTION_SLOT]
-        actions_step = torch.cat([a_sliding, action.unsqueeze(1)], dim=1)
-        with torch.no_grad():
-            z_next = sample_one_timestep_packed(dynamics, z_sliding, actions_step, flow_steps)
-        imagined_latents.append(z_next)
-        z_sliding = torch.cat([z_sliding, z_next.unsqueeze(1)], dim=1)
-        if z_sliding.shape[1] > ctx_len:
-            z_sliding = z_sliding[:, -ctx_len:]
-        a_sliding = torch.cat([a_sliding, action.unsqueeze(1)], dim=1)
-        if a_sliding.shape[1] > ctx_len:
-            a_sliding = a_sliding[:, -ctx_len:]
-        h = model.agent_hidden(z_sliding, a_sliding, space_mode=bc_space_mode)[:, -1]
-
-    return torch.stack(imagined_latents, dim=1)
 
 
 def _load_rl_policy_model(cfg: DictConfig, rl_ckpt: Path, device: torch.device):
@@ -110,7 +68,6 @@ def _imagine_composite_frames(
     n_spatial: int,
     image_size: int,
     channels: int,
-    bc_space_mode: str,
 ) -> torch.Tensor:
     """GT context + policy-imagined decode for remaining timesteps."""
     t_total = gt_segment.shape[1]
@@ -122,7 +79,7 @@ def _imagine_composite_frames(
     ctx_actions = actions_segment[:, :ctx_k]
     z_ctx = tokenizer.encode_images(ctx_images, patch_size)
     packed_z_ctx = pack_bottleneck_to_spatial(z_ctx, n_spatial, packing_factor)
-    z_imagined = _collect_imagined_latents(
+    z_imagined = imagine_latent_rollout(
         model,
         model.dynamics,
         packed_z_ctx,
@@ -130,9 +87,8 @@ def _imagine_composite_frames(
         model.heads.policy,
         rollout_len,
         flow_steps,
-        bc_space_mode=bc_space_mode,
         ctx_len=ctx_k,
-    )
+    ).latents
     im_frames = decode_packed_to_images(
         tokenizer,
         z_imagined,
@@ -167,7 +123,6 @@ def render_imagination_rollout_panels(
     n_spatial = tokenizer.encoder.n_latents // packing_factor
     image_size = int(cfg.model.tokenizer.image_size)
     channels = int(cfg.model.tokenizer.channels)
-    bc_space_mode = model.bc_space_mode
 
     image, action, _ = align_dynamics_batch(batch.image.to(device), batch.action.to(device))
     assert image is not None
@@ -197,7 +152,6 @@ def render_imagination_rollout_panels(
                 n_spatial=n_spatial,
                 image_size=image_size,
                 channels=channels,
-                bc_space_mode=bc_space_mode,
             )
         )
     pred_by_ctx_bkthwc = torch.cat(pred_rows, dim=0).unsqueeze(1)
@@ -242,7 +196,6 @@ def render_imagination_rollout_videos(
     n_spatial = tokenizer.encoder.n_latents // packing_factor
     image_size = int(cfg.model.tokenizer.image_size)
     channels = int(cfg.model.tokenizer.channels)
-    bc_space_mode = model.bc_space_mode
 
     image, action, _ = align_dynamics_batch(batch.image.to(device), batch.action.to(device))
     assert image is not None
@@ -268,7 +221,7 @@ def render_imagination_rollout_videos(
         z_ctx = tokenizer.encode_images(ctx_images, patch_size)
         packed_z_ctx = pack_bottleneck_to_spatial(z_ctx, n_spatial, packing_factor)
 
-        z_imagined = _collect_imagined_latents(
+        z_imagined = imagine_latent_rollout(
             model,
             model.dynamics,
             packed_z_ctx,
@@ -276,9 +229,8 @@ def render_imagination_rollout_videos(
             model.heads.policy,
             horizon,
             flow_steps,
-            bc_space_mode=bc_space_mode,
             ctx_len=context_len,
-        )
+        ).latents
         im_frames = decode_packed_to_images(
             tokenizer,
             z_imagined,

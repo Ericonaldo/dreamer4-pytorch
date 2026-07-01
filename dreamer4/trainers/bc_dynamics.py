@@ -6,10 +6,9 @@ import torch
 from omegaconf import DictConfig
 
 from dreamer4.callbacks import AsyncPolicyEval, log_dynamics_rollout_viz
-from dreamer4.checkpoint import load_state
 from dreamer4.data import align_dynamics_batch
 from dreamer4.eval_utils import dynamics_rollout_eval
-from dreamer4.models import PolicyModel, bc_loss, build_tokenizer
+from dreamer4.models import bc_loss, build_policy
 from dreamer4.models.dynamics import pack_bottleneck_to_spatial, shortcut_forcing_loss
 from dreamer4.trainers.base import BaseModule
 
@@ -23,27 +22,13 @@ class BCDynamicsModule(BaseModule):
         super().__init__(cfg)
         self._env_eval = AsyncPolicyEval()
 
-        self.tokenizer = build_tokenizer(cfg.model.tokenizer)
-        if cfg.get("tokenizer_ckpt"):
-            load_state(self.tokenizer, cfg.tokenizer_ckpt, prefix="model.")
-        for p in self.tokenizer.parameters():
-            p.requires_grad_(False)
-
-        n_latents = self.tokenizer.encoder.n_latents
-        latent_dim = self.tokenizer.encoder.bottleneck_proj.out_features
-        self.packing_factor = int(cfg.model.dynamics.get("packing_factor", 1))
-        self.n_spatial = n_latents // self.packing_factor
+        self.tokenizer, self.model, self.n_spatial, self.packing_factor = build_policy(
+            cfg, tokenizer_ckpt=cfg.get("tokenizer_ckpt")
+        )
         self.patch_size = int(cfg.model.tokenizer.patch_size)
         self.image_size = int(cfg.model.tokenizer.image_size)
         self.channels = int(cfg.model.tokenizer.channels)
         self.action_horizon = int(cfg.model.get("action_horizon", 8))
-
-        self.model = PolicyModel(
-            cfg.model.dynamics,
-            n_latents=n_latents,
-            latent_dim=latent_dim,
-            heads_cfg=cfg.model,
-        )
 
         self.dynamics_space_mode = self.model.dynamics_space_mode
         self.bc_space_mode = self.model.bc_space_mode
