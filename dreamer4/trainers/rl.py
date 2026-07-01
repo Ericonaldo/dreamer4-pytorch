@@ -17,10 +17,8 @@ from dreamer4.models.policy import (
     POLICY_ENV_ACTION_SLOT,
     PolicyModel,
     SquashedGaussianHead,
+    SymlogHead,
     imagination_rl_loss,
-    init_value_head_from_reward_head,
-    SymExpTwoHotEncoder,
-    SymExpTwoHotHead,
 )
 from dreamer4.trainers.base import BaseModule
 
@@ -134,7 +132,6 @@ class RLModule(BaseModule):
         latent_dim = self.tokenizer.encoder.bottleneck_proj.out_features
         self.packing_factor = int(cfg.model.dynamics.get("packing_factor", 1))
         self.n_spatial = n_latents // self.packing_factor
-        self.patch_size = int(cfg.model.tokenizer.patch_size)
 
         self.model = PolicyModel(
             cfg.model.dynamics,
@@ -154,19 +151,13 @@ class RLModule(BaseModule):
         for p in self.policy_prior.parameters():
             p.requires_grad_(False)
 
-        reward_bins = int(cfg.model.get("reward_bins", 255))
-        reward_symexp_span = float(cfg.model.get("reward_symexp_span", 20.0))
         value_hidden = int(cfg.model.get("value_hidden", cfg.model.get("reward_hidden", 256)))
         value_layers = int(cfg.model.get("value_layers", cfg.model.get("reward_layers", 1)))
-        value_enc = SymExpTwoHotEncoder(num_bins=reward_bins, symexp_span=reward_symexp_span)
-        self.value_head = SymExpTwoHotHead(
+        self.value_head = SymlogHead(
             self.model.d_model,
             value_hidden,
-            (value_enc.num_bins,),
-            value_enc,
             layers=value_layers,
         )
-        init_value_head_from_reward_head(self.value_head, self.model.heads.reward_head)
 
         self.bc_space_mode = self.model.bc_space_mode
         self._env_eval = AsyncPolicyEval()
@@ -195,10 +186,6 @@ class RLModule(BaseModule):
             "optimizer": optimizer,
             "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
         }
-
-    def _encode_packed(self, image_bthwc: torch.Tensor) -> torch.Tensor:
-        z = self.tokenizer.encode_images(image_bthwc)
-        return pack_bottleneck_to_spatial(z, self.n_spatial, self.packing_factor)
 
     def _sample_context_window(
         self,
@@ -258,7 +245,9 @@ class RLModule(BaseModule):
         image_ctx, action_ctx, ctx_len = self._sample_context_window(image, action)
 
         with torch.no_grad():
-            packed_z = self._encode_packed(image_ctx)
+            packed_z = pack_bottleneck_to_spatial(
+                self.tokenizer.encode_images(image_ctx), self.n_spatial, self.packing_factor
+            )
 
         rollout = _imagine_latent_rollout(
             self.model,

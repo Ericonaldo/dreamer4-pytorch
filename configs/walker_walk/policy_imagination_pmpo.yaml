@@ -48,8 +48,6 @@ model:
   policy_hidden: 256
   reward_hidden: 256
   value_hidden: 256
-  reward_bins: 255
-  reward_symexp_span: 20.0
   reward_layers: 1
   value_layers: 1
   log_std_min: -5.0

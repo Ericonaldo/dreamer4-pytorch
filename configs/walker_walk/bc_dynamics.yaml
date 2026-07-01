@@ -47,8 +47,6 @@ model:
   action_horizon: 8
   policy_hidden: 256
   reward_hidden: 256
-  reward_bins: 255
-  reward_symexp_span: 20.0
   reward_layers: 1
   log_std_min: -5.0
   log_std_max: 2.0
