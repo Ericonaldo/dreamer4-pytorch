@@ -9,8 +9,8 @@ data:
   val_seed: 0
 
 # Warm-start from joint BC+dynamics checkpoint (same arch as bc_dynamics.yaml).
-tokenizer_ckpt: logs/walker_walk/tokenizer_5m/checkpoints/step-step=20000.ckpt
-bc_ckpt: logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt
+tokenizer_ckpt: logs/walker_walk/tokenizer/checkpoints/step-step=20000.ckpt
+bc_ckpt: logs/walker_walk/bc_dynamics/checkpoints/last.ckpt
 
 model:
   tokenizer:

@@ -76,8 +76,8 @@ def make_tau_schedule(*, k_max: int, flow_steps: int) -> dict[str, Any]:
     e = int(round(math.log2(K)))
     assert (1 << e) == K, "flow_steps must be a power of two"
     scale = k_max // K
-    tau = [i / K for i in range(K)] + [1.0]
-    tau_idx = [i * scale for i in range(K)] + [k_max]
+    tau = [i / K for i in range(K)]
+    tau_idx = [i * scale for i in range(K)]
     return dict(K=K, e=e, scale=scale, tau=tau, tau_idx=tau_idx, dt=1.0 / K)
 
 
