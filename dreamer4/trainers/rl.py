@@ -6,13 +6,13 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from lightning.pytorch.utilities import rank_zero_warn
 from omegaconf import DictConfig
 
-from dreamer4.data import align_dynamics_batch
-from dreamer4.modules.base import BaseModule
+from dreamer4.callbacks import AsyncPolicyEval
 from dreamer4.checkpoint import load_state
-from dreamer4.models.dynamics import sample_one_timestep_packed
+from dreamer4.data import align_dynamics_batch
+from dreamer4.models import build_tokenizer
+from dreamer4.models.dynamics import pack_bottleneck_to_spatial, sample_one_timestep_packed
 from dreamer4.models.policy import (
     POLICY_ENV_ACTION_SLOT,
     PolicyModel,
@@ -22,7 +22,7 @@ from dreamer4.models.policy import (
     SymExpTwoHotEncoder,
     SymExpTwoHotHead,
 )
-from dreamer4.callbacks import AsyncPolicyEval
+from dreamer4.trainers.base import BaseModule
 
 
 @dataclass
@@ -110,10 +110,6 @@ class RLModule(BaseModule):
 
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
-        from dreamer4.models import PolicyModel, build_tokenizer
-        from dreamer4.models.dynamics import pack_bottleneck_to_spatial
-
-        self._pack = pack_bottleneck_to_spatial
 
         imag = cfg.imagination
         self.seq_len = int(cfg.data.seq_len)
@@ -202,7 +198,7 @@ class RLModule(BaseModule):
 
     def _encode_packed(self, image_bthwc: torch.Tensor) -> torch.Tensor:
         z = self.tokenizer.encode_images(image_bthwc)
-        return self._pack(z, self.n_spatial, self.packing_factor)
+        return pack_bottleneck_to_spatial(z, self.n_spatial, self.packing_factor)
 
     def _sample_context_window(
         self,

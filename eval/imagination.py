@@ -30,7 +30,9 @@ from dreamer4.data import align_dynamics_batch
 from dreamer4.models.dynamics import (
     decode_packed_to_images,
     pack_bottleneck_to_spatial,
+    sample_one_timestep_packed,
 )
+from dreamer4.models.policy import POLICY_ENV_ACTION_SLOT
 from dreamer4.agent import load_policy_modules
 
 from eval.data_stats import episode_cumulative_returns, select_episodes_by_return
@@ -53,9 +55,6 @@ def _collect_imagined_latents(
     ctx_len: int,
 ) -> torch.Tensor:
     """Run imagination rollout; return predicted latents (B, H, n_spatial, d_spatial)."""
-    from dreamer4.models.dynamics import sample_one_timestep_packed
-    from dreamer4.models.policy import POLICY_ENV_ACTION_SLOT
-
     z_sliding = packed_z_ctx[:, -ctx_len:].float()
     a_sliding = actions_ctx[:, -ctx_len:].float()
 

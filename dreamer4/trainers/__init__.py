@@ -1,7 +1,7 @@
-from dreamer4.modules.base import BaseModule
-from dreamer4.modules.bc_dynamics import BCDynamicsModule
-from dreamer4.modules.rl import RLModule
-from dreamer4.modules.tokenizer import TokenizerModule
+from dreamer4.trainers.base import BaseModule
+from dreamer4.trainers.bc_dynamics import BCDynamicsModule
+from dreamer4.trainers.rl import RLModule
+from dreamer4.trainers.tokenizer import TokenizerModule
 
 STAGES = {
     "tokenizer": TokenizerModule,

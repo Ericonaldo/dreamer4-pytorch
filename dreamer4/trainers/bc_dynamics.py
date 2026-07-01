@@ -3,13 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
-from lightning.pytorch.utilities import rank_zero_warn
 from omegaconf import DictConfig
 
-from dreamer4.callbacks import AsyncPolicyEval
-from dreamer4.data import align_dynamics_batch
+from dreamer4.callbacks import AsyncPolicyEval, log_dynamics_rollout_viz
 from dreamer4.checkpoint import load_state
-from dreamer4.modules.base import BaseModule
+from dreamer4.data import align_dynamics_batch
+from dreamer4.eval_utils import dynamics_rollout_eval
+from dreamer4.models import PolicyModel, bc_loss, build_tokenizer
+from dreamer4.models.dynamics import pack_bottleneck_to_spatial, shortcut_forcing_loss
+from dreamer4.trainers.base import BaseModule
 
 
 class BCDynamicsModule(BaseModule):
@@ -19,12 +21,6 @@ class BCDynamicsModule(BaseModule):
 
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
-        from dreamer4.models import PolicyModel, build_tokenizer, bc_loss
-        from dreamer4.models.dynamics import pack_bottleneck_to_spatial, shortcut_forcing_loss
-
-        self._pack = pack_bottleneck_to_spatial
-        self._bc_loss = bc_loss
-        self._shortcut_forcing_loss = shortcut_forcing_loss
         self._env_eval = AsyncPolicyEval()
 
         self.tokenizer = build_tokenizer(cfg.model.tokenizer)
@@ -63,11 +59,11 @@ class BCDynamicsModule(BaseModule):
         self.rollout_horizon = int(cfg.train.get("rollout_horizon", 8))
         self.rollout_flow_steps = int(cfg.train.get("rollout_flow_steps", 8))
         self._val_rollout_batch: tuple[torch.Tensor, torch.Tensor] | None = None
-        self._val_rollout_viz_idx: int | None = None
+        self._val_viz_idx: int | None = None
 
     def _encode_packed(self, image_bthwc: torch.Tensor) -> torch.Tensor:
         z = self.tokenizer.encode_images(image_bthwc)
-        return self._pack(z, self.n_spatial, self.packing_factor)
+        return pack_bottleneck_to_spatial(z, self.n_spatial, self.packing_factor)
 
     def _shared_step(self, batch, stage: str) -> torch.Tensor:
         if batch.image is None:
@@ -80,7 +76,7 @@ class BCDynamicsModule(BaseModule):
         B = packed_z.shape[0]
         B_self = int(round(self.shortcut_self_fraction * B))
         B_self = max(0, min(B - 1, B_self))
-        flow_loss, flow_metrics = self._shortcut_forcing_loss(
+        flow_loss, flow_metrics = shortcut_forcing_loss(
             self.model.dynamics,
             packed_z,
             action,
@@ -91,7 +87,7 @@ class BCDynamicsModule(BaseModule):
             space_mode=self.dynamics_space_mode,
         )
         bc_outputs = self.model(packed_z, action, space_mode=self.bc_space_mode)
-        bc_loss_val, bc_metrics = self._bc_loss(
+        bc_loss_val, bc_metrics = bc_loss(
             bc_outputs,
             action,
             reward,
@@ -115,16 +111,16 @@ class BCDynamicsModule(BaseModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        if self.trainer.is_global_zero and batch.image is not None:
-            if batch_idx == 0:
-                n_batches = self._num_val_batches()
-                g = torch.Generator()
-                g.manual_seed(int(self.trainer.global_step))
-                self._val_rollout_viz_idx = int(torch.randint(0, n_batches, (1,), generator=g).item())
-                self._val_rollout_batch = None
-            if batch_idx == self._val_rollout_viz_idx:
-                image, action, _ = align_dynamics_batch(batch.image, batch.action)
-                self._val_rollout_batch = (image.detach(), action.detach())
+        if self.trainer.is_global_zero and batch.image is not None and batch_idx == 0:
+            self._pick_val_viz_batch_idx()
+            self._val_rollout_batch = None
+        if (
+            self.trainer.is_global_zero
+            and batch.image is not None
+            and batch_idx == self._val_viz_idx
+        ):
+            image, action, _ = align_dynamics_batch(batch.image, batch.action)
+            self._val_rollout_batch = (image.detach(), action.detach())
         return self._shared_step(batch, "val")
 
     def on_train_batch_end(self, *_) -> None:
@@ -140,12 +136,9 @@ class BCDynamicsModule(BaseModule):
             return
 
         if self._val_rollout_batch is not None:
-            from dreamer4.callbacks import log_dynamics_rollout_viz
-            from dreamer4.eval_utils import dynamics_rollout_eval
-
             image, action = self._val_rollout_batch
             self._val_rollout_batch = None
-            self._val_rollout_viz_idx = None
+            self._val_viz_idx = None
 
             max_items = int(self.cfg.log.get("viz_max_items", 4))
             result = dynamics_rollout_eval(

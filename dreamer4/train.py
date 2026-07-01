@@ -16,7 +16,7 @@ from dreamer4.callbacks import (
 )
 from dreamer4.config import load_config, save_config
 from dreamer4.data import GranularEpisodeDataset, collate_episodes, split_episode_indices
-from dreamer4.modules import STAGES
+from dreamer4.trainers import STAGES
 
 
 def _window_mode(cfg: DictConfig) -> str:

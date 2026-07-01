@@ -13,6 +13,7 @@ from omegaconf import DictConfig
 from torch.distributions import Normal
 
 from dreamer4.config import config_to_dict
+from dreamer4.models.dynamics import DynamicsModel
 
 
 # MTP slot l at aligned time t predicts action a_{t+l}; from state s_t execute a_{t+1} (slot 1).
@@ -300,7 +301,6 @@ class PolicyModel(nn.Module):
         heads_cfg: Mapping[str, Any] | DictConfig,
     ):
         super().__init__()
-        from dreamer4.models.dynamics import DynamicsModel
 
         raw = config_to_dict(dynamics_cfg)
         self.action_dim = int(raw["action_dim"])

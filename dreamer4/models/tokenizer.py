@@ -130,44 +130,31 @@ class Encoder(nn.Module):
     def __init__(
         self,
         *,
-        patch_dim: int,
-        d_model: int,
+        d_patch: int,
         n_latents: int,
         n_patches: int,
-        n_heads: int,
-        depth: int,
         d_bottleneck: int,
-        dropout: float = 0.0,
-        mlp_ratio: float = 4.0,
-        time_every: int = 4,
-        latents_only_time: bool = True,
+        scale_pos_embeds: bool,
+        transformer_kwargs: Mapping[str, Any],
         mae_p_min: float = 0.0,
         mae_p_max: float = 0.9,
-        scale_pos_embeds: bool = True,
     ):
         super().__init__()
+        d_model = transformer_kwargs["d_model"]
         self.d_model = d_model
         self.n_latents = n_latents
         self.n_patches = n_patches
         self.scale_pos_embeds = scale_pos_embeds
 
-        self.patch_proj = nn.Linear(patch_dim, d_model)
+        self.patch_proj = nn.Linear(d_patch, d_model)
         self.bottleneck_proj = nn.Linear(d_model, d_bottleneck)
 
         layout = TokenLayout(n_latents=n_latents, segments=((Modality.IMAGE, n_patches),))
-        modality_ids = layout.modality_ids()
-
         self.transformer = BlockCausalTransformer(
-            d_model=d_model,
-            n_heads=n_heads,
-            depth=depth,
             n_latents=n_latents,
-            modality_ids=modality_ids,
+            modality_ids=layout.modality_ids(),
             space_mode="encoder",
-            dropout=dropout,
-            mlp_ratio=mlp_ratio,
-            time_every=time_every,
-            latents_only_time=latents_only_time,
+            **transformer_kwargs,
         )
         self.mae = MAEReplacer(d_model=d_model, p_min=mae_p_min, p_max=mae_p_max)
 
@@ -197,20 +184,15 @@ class Decoder(nn.Module):
     def __init__(
         self,
         *,
-        d_bottleneck: int,
-        d_model: int,
-        n_heads: int,
-        depth: int,
+        d_patch: int,
         n_latents: int,
         n_patches: int,
-        d_patch: int,
-        dropout: float = 0.0,
-        mlp_ratio: float = 4.0,
-        time_every: int = 4,
-        latents_only_time: bool = True,
-        scale_pos_embeds: bool = True,
+        d_bottleneck: int,
+        scale_pos_embeds: bool,
+        transformer_kwargs: Mapping[str, Any],
     ):
         super().__init__()
+        d_model = transformer_kwargs["d_model"]
         self.n_latents = n_latents
         self.n_patches = n_patches
         self.scale_pos_embeds = scale_pos_embeds
@@ -220,19 +202,11 @@ class Decoder(nn.Module):
         self.patch_head = nn.Linear(d_model, d_patch)
 
         layout = TokenLayout(n_latents=n_latents, segments=((Modality.IMAGE, n_patches),))
-        modality_ids = layout.modality_ids()
-
         self.transformer = BlockCausalTransformer(
-            d_model=d_model,
-            n_heads=n_heads,
-            depth=depth,
             n_latents=n_latents,
-            modality_ids=modality_ids,
+            modality_ids=layout.modality_ids(),
             space_mode="decoder",
-            dropout=dropout,
-            mlp_ratio=mlp_ratio,
-            time_every=time_every,
-            latents_only_time=latents_only_time,
+            **transformer_kwargs,
         )
         self._init_weights()
 
@@ -285,31 +259,19 @@ class Tokenizer(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def _as_int(cfg: Mapping[str, Any], key: str, default: int) -> int:
-    return int(cfg.get(key, default))
-
-
-def _as_float(cfg: Mapping[str, Any], key: str, default: float) -> float:
-    return float(cfg.get(key, default))
-
-
-def _as_bool(cfg: Mapping[str, Any], key: str, default: bool) -> bool:
-    return bool(cfg.get(key, default))
-
-
 def build_tokenizer(cfg: Mapping[str, Any] | DictConfig) -> Tokenizer:
     """Build Tokenizer from YAML `model` or `model.tokenizer` (OmegaConf dict)."""
     raw = config_to_dict(cfg)
-    H = _as_int(raw, "image_size", 64)
-    W = _as_int(raw, "image_size", 64)
-    C = _as_int(raw, "channels", 3)
-    patch = _as_int(raw, "patch_size", 16)
+    H = int(raw["image_size"])
+    W = int(raw["image_size"])
+    C = int(raw["channels"])
+    patch = int(raw["patch_size"])
 
-    d_model = _as_int(raw, "embed_dim", 128)
-    n_heads = _as_int(raw, "num_heads", 4)
-    depth = _as_int(raw, "depth", 2)
-    n_latents = _as_int(raw, "n_latents", 8)
-    d_bottleneck = _as_int(raw, "latent_dim", 32)
+    d_model = int(raw["embed_dim"])
+    n_heads = int(raw["num_heads"])
+    depth = int(raw["depth"])
+    n_latents = int(raw["n_latents"])
+    d_bottleneck = int(raw["latent_dim"])
 
     assert H % patch == 0 and W % patch == 0
     assert d_model % n_heads == 0
@@ -317,36 +279,32 @@ def build_tokenizer(cfg: Mapping[str, Any] | DictConfig) -> Tokenizer:
     n_patches = (H // patch) * (W // patch)
     d_patch = patch * patch * C
 
-    enc = Encoder(
-        patch_dim=d_patch,
+    dropout = float(raw.get("dropout", 0.0))
+    mlp_ratio = float(raw.get("mlp_ratio", 2.0))
+    time_every = int(raw.get("time_every", 2))
+    latents_only_time = bool(raw.get("latents_only_time", True))
+    scale_pos_embeds = bool(raw.get("scale_pos_embeds", True))
+
+    transformer_kwargs = dict(
         d_model=d_model,
-        n_latents=n_latents,
-        n_patches=n_patches,
         n_heads=n_heads,
         depth=depth,
-        d_bottleneck=d_bottleneck,
-        dropout=_as_float(raw, "dropout", 0.0),
-        mlp_ratio=_as_float(raw, "mlp_ratio", 2.0),
-        time_every=_as_int(raw, "time_every", 2),
-        latents_only_time=_as_bool(raw, "latents_only_time", True),
-        mae_p_min=_as_float(raw, "mae_p_min", 0.0),
-        mae_p_max=_as_float(raw, "mae_p_max", 0.5),
-        scale_pos_embeds=_as_bool(raw, "scale_pos_embeds", True),
+        dropout=dropout,
+        mlp_ratio=mlp_ratio,
+        time_every=time_every,
+        latents_only_time=latents_only_time,
     )
-    dec = Decoder(
-        d_bottleneck=d_bottleneck,
-        d_model=d_model,
-        n_heads=n_heads,
-        depth=depth,
-        n_latents=n_latents,
-        n_patches=n_patches,
+
+    common_kwargs = dict(
         d_patch=d_patch,
-        dropout=_as_float(raw, "dropout", 0.0),
-        mlp_ratio=_as_float(raw, "mlp_ratio", 2.0),
-        time_every=_as_int(raw, "time_every", 2),
-        latents_only_time=_as_bool(raw, "latents_only_time", True),
-        scale_pos_embeds=_as_bool(raw, "scale_pos_embeds", True),
+        n_latents=n_latents,
+        n_patches=n_patches,
+        d_bottleneck=d_bottleneck,
+        scale_pos_embeds=scale_pos_embeds,
+        transformer_kwargs=transformer_kwargs,
     )
+    enc = Encoder(**common_kwargs, mae_p_min=float(raw.get("mae_p_min", 0.0)), mae_p_max=float(raw.get("mae_p_max", 0.5)))
+    dec = Decoder(**common_kwargs)
     model = Tokenizer(enc, dec)
     model.patch_size = patch
     model._cfg = raw
