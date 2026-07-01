@@ -227,17 +227,6 @@ class DynamicsModel(nn.Module):
         self.dropout = float(raw.get("dropout", 0.0))
         self.time_every = int(raw.get("time_every", 4))
         self.scale_pos_embeds = bool(raw.get("scale_pos_embeds", True))
-        space_modes_raw = raw.get("space_modes")
-        if space_modes_raw is not None:
-            self.space_modes = tuple(str(m) for m in space_modes_raw)
-            self.space_mode = str(raw.get("space_mode", self.space_modes[0]))
-        else:
-            self.space_mode = str(raw.get("space_mode", "wm_dynamics"))
-            self.space_modes = (self.space_mode,)
-        if self.space_mode not in self.space_modes:
-            raise ValueError(
-                f"dynamics.space_mode {self.space_mode!r} must be listed in space_modes {self.space_modes}"
-            )
         self.packing_factor = int(raw.get("packing_factor", 1))
         self.n_register = int(raw.get("n_register", 0))
         self.n_agent = int(raw.get("n_agent", 1))
@@ -282,13 +271,14 @@ class DynamicsModel(nn.Module):
         self.spatial_slice = sl[Modality.SPATIAL]
         self.agent_slice = sl.get(Modality.AGENT, slice(0, 0))
 
+        space_modes = ("wm_dynamics", "wm_agent") if self.n_agent > 0 else ("wm_dynamics",)
         self.transformer = BlockCausalTransformer(
             d_model=self.d_model,
             n_heads=self.n_heads,
             depth=self.depth,
             n_latents=0,
             modality_ids=layout.modality_ids(),
-            space_mode=self.space_modes,
+            space_mode=space_modes,
             dropout=self.dropout,
             mlp_ratio=self.mlp_ratio,
             time_every=self.time_every,
@@ -394,7 +384,13 @@ def sample_one_timestep_packed(
     for i in range(K):
         signal_idxs[:, -1] = int(tau_idx[i])
         z_tilde = torch.cat([past_packed, z], dim=1)
-        z1_hat, _ = model(actions[:, : t + 1], step_idxs, signal_idxs, z_tilde)
+        z1_hat, _ = model(
+            actions[:, : t + 1],
+            step_idxs,
+            signal_idxs,
+            z_tilde,
+            space_mode="wm_dynamics",
+        )
         x1_hat = z1_hat[:, -1:]
         tau_i = float(tau[i])
         denom = max(1e-4, 1.0 - tau_i)
