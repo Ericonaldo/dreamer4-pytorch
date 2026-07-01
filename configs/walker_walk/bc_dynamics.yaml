@@ -1,7 +1,9 @@
 stage: bc_dynamics
 
 data:
-  path: data/dmc_walker_walk
+  paths:
+    - data/dmc_walker_walk
+    - data/dmc_walker_walk_random500
   seq_len: 16
   obs_mode: image
   num_workers: 8
@@ -9,7 +11,7 @@ data:
   val_seed: 0
 
 # Must match tokenizer.yaml arch (frozen encode only; default log run_name: walker_walk/tokenizer).
-tokenizer_ckpt: logs/walker_walk/tokenizer/checkpoints/step-step=20000.ckpt
+tokenizer_ckpt: logs/walker_walk/tokenizer/checkpoints/last.ckpt
 
 model:
   tokenizer:
@@ -53,7 +55,7 @@ model:
 
 train:
   batch_size: 64
-  max_steps: 50_000
+  max_steps: 75_000
   checkpoint_every: 2000
   checkpoint_keep_last: 5
   val_every: 1000

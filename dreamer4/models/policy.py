@@ -550,38 +550,33 @@ def imagination_rl_policy_loss(
     *,
     beta: float,
     alpha: float = 0.5,
-    train_policy: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     """PMPO policy + KL loss on imagined trajectories; returns (pi_loss, kl_loss, metrics)."""
     slot = POLICY_ENV_ACTION_SLOT
     imagined_actions_f = imagined_actions.detach().float()
 
-    policy_ctx = torch.enable_grad() if train_policy else torch.no_grad()
-    with policy_ctx:
-        _, mean_u, log_std = heads.policy(h_pi)
-        if not torch.isfinite(mean_u).all():
-            raise RuntimeError("non-finite policy mean_u in imagination_rl_loss")
+    _, mean_u, log_std = heads.policy(h_pi)
+    if not torch.isfinite(mean_u).all():
+        raise RuntimeError("non-finite policy mean_u in imagination_rl_loss")
 
-        log_prob = heads.policy.log_prob(
-            mean_u[:, :, slot],
-            log_std[:, :, slot],
-            imagined_actions_f,
-        )
-        pi_loss = pmpo_policy_loss(log_prob, advantages, alpha)
-        _, mean_u_bc, log_std_bc = policy_prior(h_pi)
-        kl = heads.policy.gaussian_kl(
-            mean_u[:, :, slot],
-            log_std[:, :, slot],
-            mean_u_bc[:, :, slot],
-            log_std_bc[:, :, slot],
-        ).mean()
-        kl_loss = beta * kl
+    log_prob = heads.policy.log_prob(
+        mean_u[:, :, slot],
+        log_std[:, :, slot],
+        imagined_actions_f,
+    )
+    pi_loss = pmpo_policy_loss(log_prob, advantages, alpha)
+    _, mean_u_bc, log_std_bc = policy_prior(h_pi)
+    kl = heads.policy.gaussian_kl(
+        mean_u[:, :, slot],
+        log_std[:, :, slot],
+        mean_u_bc[:, :, slot],
+        log_std_bc[:, :, slot],
+    ).mean()
+    kl_loss = beta * kl
 
-    pi_loss_f = float(pi_loss.detach())
-    kl_loss_f = float(kl_loss.detach())
     metrics: dict[str, float] = {
-        "pi_loss": pi_loss_f if train_policy else 0.0,
-        "pi_kl_loss": kl_loss_f if train_policy else 0.0,
+        "pi_loss": float(pi_loss.detach()),
+        "pi_kl_loss": float(kl_loss.detach()),
     }
     return pi_loss, kl_loss, metrics
 
@@ -598,7 +593,7 @@ def imagination_rl_loss(
     beta: float,
     alpha: float = 0.5,
     normalize_advantages: bool = False,
-    train_policy: bool = True,
+    policy_weight: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
     Value symlog MSE on TD-λ targets + PMPO policy loss + KL(π || π_BC) on imagined trajectories.
@@ -627,9 +622,8 @@ def imagination_rl_loss(
         policy_prior,
         beta=beta,
         alpha=alpha,
-        train_policy=train_policy,
     )
     metrics.update(policy_metrics)
 
-    total = val_loss + (pi_loss + kl_loss if train_policy else 0.0)
+    total = val_loss + policy_weight * (pi_loss + kl_loss)
     return total, metrics
