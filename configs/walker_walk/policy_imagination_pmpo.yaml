@@ -44,8 +44,6 @@ model:
     n_agent: 1
     action_dim: 6
     k_max: 64
-    space_modes: [wm_dynamics, wm_agent]
-    space_mode: wm_dynamics
   action_horizon: 8
   policy_hidden: 256
   reward_hidden: 256

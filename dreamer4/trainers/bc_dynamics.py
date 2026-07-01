@@ -30,9 +30,6 @@ class BCDynamicsModule(BaseModule):
         self.channels = int(cfg.model.tokenizer.channels)
         self.action_horizon = int(cfg.model.get("action_horizon", 8))
 
-        self.dynamics_space_mode = self.model.dynamics_space_mode
-        self.bc_space_mode = self.model.bc_space_mode
-
         self.flow_weight = float(cfg.train.get("flow_weight", 1.0))
         self.action_weight = float(cfg.train.get("action_weight", 1.0))
         self.reward_weight = float(cfg.train.get("reward_weight", 1.0))
@@ -67,9 +64,9 @@ class BCDynamicsModule(BaseModule):
             B_self=B_self,
             global_step=int(self.global_step),
             bootstrap_start=self.shortcut_bootstrap_start,
-            space_mode=self.dynamics_space_mode,
+            space_mode="wm_dynamics",
         )
-        bc_outputs = self.model(packed_z, action, space_mode=self.bc_space_mode)
+        bc_outputs = self.model(packed_z, action, space_mode="wm_agent")
         bc_loss_val, bc_metrics = bc_loss(
             bc_outputs,
             action,

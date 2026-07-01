@@ -230,10 +230,6 @@ class PolicyModel(nn.Module):
 
         self.dynamics = DynamicsModel(raw, n_latents=n_latents, latent_dim=latent_dim)
 
-        self.dynamics_space_mode = str(
-            raw.get("dynamics_space_mode", self.dynamics.space_mode)
-        )
-        self.bc_space_mode = str(raw.get("bc_space_mode", "wm_agent"))
         self.agent_tokens = nn.Parameter(torch.empty(self.n_agent, self.d_model))
         heads = config_to_dict(heads_cfg)
         self.heads = AgentHeads(
@@ -268,7 +264,7 @@ class PolicyModel(nn.Module):
             signal_idx,
             packed_z,
             agent_tokens=agent_tokens,
-            space_mode=space_mode or self.bc_space_mode,
+            space_mode=space_mode or "wm_agent",
         )
         if h_agent is None:
             raise ValueError("PolicyModel requires n_agent > 0 on dynamics backbone")
@@ -345,10 +341,9 @@ def imagine_latent_rollout(
 
     z_sliding = z_sliding.float()
     a_sliding = a_sliding.float()
-    space_mode = policy_model.bc_space_mode
 
     with torch.no_grad():
-        h_seq = policy_model.agent_hidden(z_sliding, a_sliding, space_mode=space_mode)
+        h_seq = policy_model.agent_hidden(z_sliding, a_sliding)
     h = h_seq[:, -1]
 
     imagined_latents: list[torch.Tensor] = []
@@ -385,7 +380,7 @@ def imagine_latent_rollout(
         if a_sliding.shape[1] > ctx_len:
             a_sliding = a_sliding[:, -ctx_len:]
         with torch.no_grad():
-            h = policy_model.agent_hidden(z_sliding, a_sliding, space_mode=space_mode)[:, -1]
+            h = policy_model.agent_hidden(z_sliding, a_sliding)[:, -1]
 
         imagined_hidden.append(h)
 
