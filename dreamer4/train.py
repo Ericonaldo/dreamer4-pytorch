@@ -8,14 +8,19 @@ import torch
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from omegaconf import DictConfig
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 
 from dreamer4.callbacks import (
     KeepLastCheckpoints,
     SaveCheckpointAfterPolicyWarmup,
 )
 from dreamer4.config import load_config, save_config
-from dreamer4.data import GranularEpisodeDataset, collate_episodes, split_episode_indices
+from dreamer4.data import (
+    GranularEpisodeDataset,
+    collate_episodes,
+    resolve_data_paths,
+    split_episode_indices,
+)
 from dreamer4.trainers import STAGES
 
 
@@ -26,15 +31,48 @@ def _window_mode(cfg: DictConfig) -> str:
     return "transition" if cfg.stage in ("bc_dynamics", "rl") else "frame"
 
 
-def _episode_dataset(cfg: DictConfig, episode_indices: list[int] | None) -> GranularEpisodeDataset:
+def _episode_dataset(
+    cfg: DictConfig,
+    path: str,
+    episode_indices: list[int] | None,
+    *,
+    verbose: bool = True,
+) -> GranularEpisodeDataset:
     return GranularEpisodeDataset(
-        path=cfg.data.path,
+        path=path,
         seq_len=cfg.data.seq_len,
         obs_mode=cfg.data.obs_mode,
         episode_indices=episode_indices,
         window_mode=_window_mode(cfg),
-        verbose=bool(cfg.data.get("verbose", True)),
+        verbose=verbose,
     )
+
+
+def _merged_episode_dataset(
+    cfg: DictConfig,
+    episode_indices_per_path: list[list[int] | None] | None = None,
+    *,
+    verbose: bool = True,
+) -> GranularEpisodeDataset | ConcatDataset:
+    paths = resolve_data_paths(cfg.data)
+    indices = episode_indices_per_path or [None] * len(paths)
+    if len(indices) != len(paths):
+        raise ValueError(f"episode_indices_per_path length {len(indices)} != paths {len(paths)}")
+    parts = [
+        _episode_dataset(cfg, path, ep_idx, verbose=verbose)
+        for path, ep_idx in zip(paths, indices)
+    ]
+    if len(parts) == 1:
+        return parts[0]
+    return ConcatDataset(parts)
+
+
+def _reset_granular_readers(dataset) -> None:
+    if isinstance(dataset, ConcatDataset):
+        for part in dataset.datasets:
+            _reset_granular_readers(part)
+    elif isinstance(dataset, GranularEpisodeDataset):
+        dataset.reset_reader()
 
 
 def _granular_worker_init_fn(_worker_id: int) -> None:
@@ -42,26 +80,30 @@ def _granular_worker_init_fn(_worker_id: int) -> None:
     info = torch.utils.data.get_worker_info()
     if info is None:
         return
-    dataset = info.dataset
-    if isinstance(dataset, GranularEpisodeDataset):
-        dataset.reset_reader()
+    _reset_granular_readers(info.dataset)
 
 
 def build_dataloaders(cfg: DictConfig) -> tuple[DataLoader, DataLoader | None]:
     val_fraction = float(cfg.data.get("val_fraction", 0.0))
-    probe = _episode_dataset(cfg, episode_indices=None)
-    n_episodes = probe.num_episodes
+    paths = resolve_data_paths(cfg.data)
+    val_seed = int(cfg.data.get("val_seed", 0))
 
-    val_episodes: list[int] | None = None
-    train_episodes: list[int] | None = None
+    train_indices_per_path: list[list[int] | None] | None = None
+    val_indices_per_path: list[list[int] | None] | None = None
     if val_fraction > 0:
-        train_episodes, val_episodes = split_episode_indices(
-            n_episodes,
-            val_fraction,
-            int(cfg.data.get("val_seed", 0)),
-        )
+        train_indices_per_path = []
+        val_indices_per_path = []
+        for i, path in enumerate(paths):
+            probe = _episode_dataset(cfg, path, None, verbose=False)
+            train_idx, val_idx = split_episode_indices(
+                probe.num_episodes,
+                val_fraction,
+                val_seed + i,
+            )
+            train_indices_per_path.append(train_idx)
+            val_indices_per_path.append(val_idx)
 
-    train_ds = _episode_dataset(cfg, train_episodes)
+    train_ds = _merged_episode_dataset(cfg, train_indices_per_path)
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg.train.batch_size,
@@ -74,10 +116,10 @@ def build_dataloaders(cfg: DictConfig) -> tuple[DataLoader, DataLoader | None]:
     )
 
     val_loader = None
-    if val_episodes is not None:
+    if val_indices_per_path is not None:
         val_batch = int(cfg.train.get("val_batch_size", cfg.train.batch_size))
         val_loader = DataLoader(
-            _episode_dataset(cfg, val_episodes),
+            _merged_episode_dataset(cfg, val_indices_per_path, verbose=False),
             batch_size=val_batch,
             shuffle=False,
             num_workers=cfg.data.num_workers,
