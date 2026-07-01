@@ -35,7 +35,6 @@ class RLModule(BaseModule):
         self.lambda_ = float(imag.lambda_)
         self.alpha = float(imag.get("alpha", 0.5))
         self.beta = float(imag.beta)
-        self.normalize_advantages = bool(imag.get("normalize_advantages", False))
         self.policy_warmup_steps = int(imag.get("policy_warmup_steps", 200))
         self._policy_lr = float(imag.get("policy_lr", cfg.train.optimizer.lr))
 
@@ -185,7 +184,6 @@ class RLModule(BaseModule):
             lambda_=self.lambda_,
             beta=self.beta,
             alpha=self.alpha,
-            normalize_advantages=self.normalize_advantages,
             policy_weight=policy_weight,
         )
 

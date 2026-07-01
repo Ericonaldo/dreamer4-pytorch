@@ -506,7 +506,6 @@ def imagination_rl_value_loss(
     *,
     gamma: float,
     lambda_: float,
-    normalize_advantages: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     """Value symlog MSE on TD-λ targets; returns (val_loss, advantages, value metrics)."""
     h = hidden.detach()
@@ -522,9 +521,6 @@ def imagination_rl_value_loss(
     val_loss = value_head.loss(val_symlog[:, :-1], td_returns).mean()
 
     advantages = (td_returns - values[:, :-1]).detach().float()
-    if normalize_advantages:
-        adv_std = advantages.std().clamp_min(1e-8)
-        advantages = (advantages - advantages.mean()) / adv_std
 
     metrics = {
         "val_loss": float(val_loss.detach()),
@@ -587,7 +583,6 @@ def imagination_rl_loss(
     lambda_: float,
     beta: float,
     alpha: float = 0.5,
-    normalize_advantages: bool = False,
     policy_weight: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
@@ -607,7 +602,6 @@ def imagination_rl_loss(
         value_head,
         gamma=gamma,
         lambda_=lambda_,
-        normalize_advantages=normalize_advantages,
     )
     pi_loss, kl_loss, policy_metrics = imagination_rl_policy_loss(
         h_pi,
