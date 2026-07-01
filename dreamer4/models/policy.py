@@ -8,7 +8,6 @@ from typing import Any, Mapping, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from omegaconf import DictConfig
 from torch.distributions import Normal
 
@@ -20,86 +19,28 @@ from dreamer4.models.dynamics import DynamicsModel
 POLICY_ENV_ACTION_SLOT = 1
 
 
+def symlog(x: torch.Tensor) -> torch.Tensor:
+    return torch.sign(x) * torch.log1p(x.abs())
+
+
 def symexp(x: torch.Tensor) -> torch.Tensor:
     return torch.sign(x) * torch.expm1(x.abs())
 
 
-def build_symexp_twohot_bins(num_bins: int, symexp_span: float = 20.0) -> torch.Tensor:
-    """Bin centers matching DreamerV3 ``Head.symexp_twohot`` (embodied/jax/heads.py)."""
-    if num_bins % 2 == 1:
-        half = torch.linspace(-symexp_span, 0, (num_bins - 1) // 2 + 1)
-        half = symexp(half)
-        return torch.cat([half, -half[:-1].flip(0)])
-    half = torch.linspace(-symexp_span, 0, num_bins // 2)
-    half = symexp(half)
-    return torch.cat([half, -half.flip(0)])
+class SymlogHead(nn.Module):
+    """MLP predicting symlog targets; decode with symexp."""
 
-
-class SymExpTwoHotEncoder(nn.Module):
-    """Two-hot targets on symexp-spaced bins (DreamerV3 ``outs.TwoHot``)."""
-
-    def __init__(self, num_bins: int = 255, symexp_span: float = 20.0):
-        super().__init__()
-        self.num_bins = int(num_bins)
-        bins = build_symexp_twohot_bins(self.num_bins, symexp_span)
-        self.register_buffer("bins", bins)
-
-    def encode(self, values: torch.Tensor) -> torch.Tensor:
-        """Scalar values -> two-hot targets (..., num_bins)."""
-        values = values.float()
-        flat = values.reshape(-1)
-        bins = self.bins
-        k = bins.numel()
-        below = (bins.unsqueeze(0) <= flat.unsqueeze(1)).sum(dim=1) - 1
-        above = k - (bins.unsqueeze(0) > flat.unsqueeze(1)).sum(dim=1)
-        below = below.clamp(0, k - 1)
-        above = above.clamp(0, k - 1)
-        equal = below == above
-        b_below = bins[below]
-        b_above = bins[above]
-        dist_below = torch.where(equal, torch.ones_like(flat), (b_below - flat).abs())
-        dist_above = torch.where(equal, torch.ones_like(flat), (b_above - flat).abs())
-        total = dist_below + dist_above
-        w_below = dist_above / total
-        w_above = dist_below / total
-        target = F.one_hot(below, k).float() * w_below.unsqueeze(-1)
-        target = target + F.one_hot(above, k).float() * w_above.unsqueeze(-1)
-        return target.view(*values.shape, k)
-
-    def decode(self, logits: torch.Tensor) -> torch.Tensor:
-        """Symmetric expectation over bins (DreamerV3 ``TwoHot.pred``)."""
-        probs = F.softmax(logits.float(), dim=-1)
-        bins = self.bins.to(dtype=probs.dtype, device=probs.device)
-        n = probs.shape[-1]
-        if n % 2 == 1:
-            m = (n - 1) // 2
-            p1, p2, p3 = probs[..., :m], probs[..., m : m + 1], probs[..., m + 1 :]
-            b1, b2, b3 = bins[:m], bins[m : m + 1], bins[m + 1 :]
-            return (p2 * b2).sum(dim=-1) + ((p1 * b1).flip(-1) + (p3 * b3)).sum(dim=-1)
-        p1, p2 = probs[..., : n // 2], probs[..., n // 2 :]
-        b1, b2 = bins[: n // 2], bins[n // 2 :]
-        return ((p1 * b1).flip(-1) + (p2 * b2)).sum(dim=-1)
-
-    def cross_entropy(self, logits: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
-        target = self.encode(values)
-        log_probs = F.log_softmax(logits.float(), dim=-1)
-        return -(target * log_probs).sum(dim=-1)
-
-
-class SymExpTwoHotHead(nn.Module):
     def __init__(
         self,
         d_in: int,
         hidden: int,
-        out_shape: tuple[int, ...],
-        encoder: SymExpTwoHotEncoder,
+        out_shape: tuple[int, ...] = (),
         *,
         layers: int = 1,
     ):
         super().__init__()
         self.out_shape = tuple(out_shape)
-        out_dim = int(math.prod(self.out_shape))
-        self.encoder = encoder
+        out_dim = int(math.prod(self.out_shape)) if self.out_shape else 1
         blocks: list[nn.Module] = []
         dim = d_in
         for _ in range(max(1, layers)):
@@ -107,38 +48,20 @@ class SymExpTwoHotHead(nn.Module):
             dim = hidden
         blocks.append(nn.Linear(dim, out_dim))
         self.net = nn.Sequential(*blocks)
-        self._init_weights()
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
 
-    def _init_weights(self) -> None:
-        last = self.net[-1]
-        assert isinstance(last, nn.Linear)
-        nn.init.zeros_(last.weight)
-        nn.init.zeros_(last.bias)
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        out = self.net(h)
+        if not self.out_shape:
+            return out.squeeze(-1)
+        return out.view(*h.shape[:2], *self.out_shape)
 
-    def forward(self, h_t: torch.Tensor) -> torch.Tensor:
-        logits = self.net(h_t)
-        return logits.view(*h_t.shape[:2], *self.out_shape)
+    def decode(self, x: torch.Tensor) -> torch.Tensor:
+        return symexp(x.float())
 
-    def loss(self, logits: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
-        return self.encoder.cross_entropy(logits, values)
-
-    def decode(self, logits: torch.Tensor) -> torch.Tensor:
-        return self.encoder.decode(logits)
-
-
-def init_value_head_from_reward_head(
-    value_head: SymExpTwoHotHead,
-    reward_head: SymExpTwoHotHead,
-) -> None:
-    """Warm-start value predictions from BC reward head MTP slot 0."""
-    with torch.no_grad():
-        rh_net = reward_head.net
-        vh_net = value_head.net
-        for i in range(len(vh_net) - 1):
-            vh_net[i].load_state_dict(rh_net[i].state_dict())
-        n_bins = value_head.encoder.num_bins
-        vh_net[-1].weight.copy_(rh_net[-1].weight[:n_bins])
-        vh_net[-1].bias.copy_(rh_net[-1].bias[:n_bins])
+    def loss(self, pred: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+        return (pred.float() - symlog(values.float())).pow(2)
 
 
 class SquashedGaussianHead(nn.Module):
@@ -234,12 +157,12 @@ class AgentOutputs:
     action: torch.Tensor
     action_mean_u: torch.Tensor
     action_log_std: torch.Tensor
-    reward_logits: torch.Tensor
+    reward_symlog: torch.Tensor
     reward: torch.Tensor
 
 
 class AgentHeads(nn.Module):
-    """BC heads: squashed Gaussian policy + symexp twohot reward MTP (DreamerV3 rewhead)."""
+    """BC heads: squashed Gaussian policy + symlog reward MTP."""
 
     def __init__(
         self,
@@ -249,8 +172,6 @@ class AgentHeads(nn.Module):
         action_horizon: int = 8,
         policy_hidden: int = 256,
         reward_hidden: int = 256,
-        reward_bins: int = 255,
-        reward_symexp_span: float = 20.0,
         reward_layers: int = 1,
         log_std_min: float = -5.0,
         log_std_max: float = 2.0,
@@ -267,24 +188,22 @@ class AgentHeads(nn.Module):
             log_std_min=log_std_min,
             log_std_max=log_std_max,
         )
-        reward_enc = SymExpTwoHotEncoder(num_bins=reward_bins, symexp_span=reward_symexp_span)
-        self.reward_head = SymExpTwoHotHead(
+        self.reward_head = SymlogHead(
             d_model,
             reward_hidden,
-            (self.action_horizon, reward_enc.num_bins),
-            reward_enc,
+            (self.action_horizon,),
             layers=reward_layers,
         )
 
     def forward(self, h_t: torch.Tensor) -> AgentOutputs:
         action, mean_u, log_std = self.policy(h_t)
-        reward_logits = self.reward_head(h_t)
-        reward = self.reward_head.decode(reward_logits)
+        reward_symlog = self.reward_head(h_t)
+        reward = self.reward_head.decode(reward_symlog)
         return AgentOutputs(
             action=action,
             action_mean_u=mean_u,
             action_log_std=log_std,
-            reward_logits=reward_logits,
+            reward_symlog=reward_symlog,
             reward=reward,
         )
 
@@ -321,8 +240,6 @@ class PolicyModel(nn.Module):
             action_horizon=int(heads.get("action_horizon", 8)),
             policy_hidden=int(heads.get("policy_hidden", 256)),
             reward_hidden=int(heads.get("reward_hidden", 256)),
-            reward_bins=int(heads.get("reward_bins", 255)),
-            reward_symexp_span=float(heads.get("reward_symexp_span", 20.0)),
             reward_layers=int(heads.get("reward_layers", 1)),
             log_std_min=float(heads.get("log_std_min", -5.0)),
             log_std_max=float(heads.get("log_std_max", 2.0)),
@@ -410,20 +327,20 @@ def bc_loss(
     action_nll = -(action_log_prob * valid).sum() / denom
 
     target_r = _future_targets(rewards.unsqueeze(-1), action_horizon).squeeze(-1)
-    reward_ce = heads.reward_head.loss(outputs.reward_logits.float(), target_r.float())
-    reward_ce = (reward_ce * valid).sum() / denom
-    reward_mse = (outputs.reward.float() - target_r.float()).pow(2)
-    reward_mse = (reward_mse * valid).sum() / denom
+    reward_symlog_mse = heads.reward_head.loss(outputs.reward_symlog.float(), target_r.float())
+    reward_symlog_mse = (reward_symlog_mse * valid).sum() / denom
+    reward_dec_mse = (outputs.reward.float() - target_r.float()).pow(2)
+    reward_dec_mse = (reward_dec_mse * valid).sum() / denom
 
     action_mse = (outputs.action.float() - target_a.float()).pow(2).mean(dim=-1)
     action_mse = (action_mse * valid).sum() / denom
 
-    loss = action_weight * action_nll + reward_weight * reward_ce
+    loss = action_weight * action_nll + reward_weight * reward_symlog_mse
     metrics = {
         "action_nll": float(action_nll.detach()),
         "action_mse": float(action_mse.detach()),
-        "reward_ce": float(reward_ce.detach()),
-        "reward_mse": float(reward_mse.detach()),
+        "reward_symlog_mse": float(reward_symlog_mse.detach()),
+        "reward_dec_mse": float(reward_dec_mse.detach()),
         "action_out_mean": float(outputs.action.float().mean().detach()),
         "action_out_abs_mean": float(outputs.action.abs().float().mean().detach()),
     }
@@ -476,25 +393,24 @@ def imagination_rl_value_loss(
     hidden: torch.Tensor,
     imagined_actions: torch.Tensor,
     heads: AgentHeads,
-    value_head: SymExpTwoHotHead,
+    value_head: SymlogHead,
     *,
     gamma: float,
     lambda_: float,
     normalize_advantages: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
-    """Value CE on TD-λ targets; returns (val_loss, advantages, value metrics)."""
+    """Value symlog MSE on TD-λ targets; returns (val_loss, advantages, value metrics)."""
     h = hidden.detach()
     H = imagined_actions.shape[1]
 
-    reward_logits = heads.reward_head(h[:, 1:])
-    reward_slot0 = reward_logits[:, :, 0]
-    rewards = heads.reward_head.decode(reward_slot0)
+    reward_symlog = heads.reward_head(h[:, 1:])
+    rewards = heads.reward_head.decode(reward_symlog[:, :, 0])
 
-    val_logits = value_head(h)
-    values = value_head.decode(val_logits)
+    val_symlog = value_head(h)
+    values = value_head.decode(val_symlog)
 
     td_returns = td_lambda_returns(rewards, values, gamma, lambda_)
-    val_loss = value_head.loss(val_logits[:, :-1], td_returns).mean()
+    val_loss = value_head.loss(val_symlog[:, :-1], td_returns).mean()
 
     advantages = (td_returns - values[:, :-1]).detach().float()
     if normalize_advantages:
@@ -561,7 +477,7 @@ def imagination_rl_loss(
     imagined_actions: torch.Tensor,
     heads: AgentHeads,
     policy_prior: SquashedGaussianHead,
-    value_head: SymExpTwoHotHead,
+    value_head: SymlogHead,
     *,
     gamma: float,
     lambda_: float,
@@ -571,7 +487,7 @@ def imagination_rl_loss(
     train_policy: bool = True,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
-    Value CE on TD-λ targets + PMPO policy loss + KL(π || π_BC) on imagined trajectories.
+    Value symlog MSE on TD-λ targets + PMPO policy loss + KL(π || π_BC) on imagined trajectories.
 
     hidden: (B, H+1, D) agent states s_0..s_H (s_0 = last context state)
     imagined_actions: (B, H, A) policy actions a_1..a_H (fixed; log_prob recomputed for PMPO)

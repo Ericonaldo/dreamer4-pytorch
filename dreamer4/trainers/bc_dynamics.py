@@ -61,17 +61,15 @@ class BCDynamicsModule(BaseModule):
         self._val_rollout_batch: tuple[torch.Tensor, torch.Tensor] | None = None
         self._val_viz_idx: int | None = None
 
-    def _encode_packed(self, image_bthwc: torch.Tensor) -> torch.Tensor:
-        z = self.tokenizer.encode_images(image_bthwc)
-        return pack_bottleneck_to_spatial(z, self.n_spatial, self.packing_factor)
-
     def _shared_step(self, batch, stage: str) -> torch.Tensor:
         if batch.image is None:
             raise ValueError("BC+dynamics training requires images; set data.obs_mode=image or both")
 
         image, action, reward = align_dynamics_batch(batch.image, batch.action, batch.reward)
         with torch.no_grad():
-            packed_z = self._encode_packed(image)
+            packed_z = pack_bottleneck_to_spatial(
+                self.tokenizer.encode_images(image), self.n_spatial, self.packing_factor
+            )
 
         B = packed_z.shape[0]
         B_self = int(round(self.shortcut_self_fraction * B))
