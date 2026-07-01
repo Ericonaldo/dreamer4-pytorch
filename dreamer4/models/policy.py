@@ -11,8 +11,10 @@ import torch.nn as nn
 from omegaconf import DictConfig
 from torch.distributions import Normal
 
+from dreamer4.checkpoint import load_state
 from dreamer4.config import config_to_dict
-from dreamer4.models.dynamics import DynamicsModel
+from dreamer4.models.dynamics import DynamicsModel, sample_one_timestep_packed
+from dreamer4.models.tokenizer import Tokenizer, build_tokenizer
 
 
 # MTP slot l at aligned time t predicts action a_{t+l}; from state s_t execute a_{t+1} (slot 1).
@@ -281,6 +283,118 @@ class PolicyModel(nn.Module):
     ) -> AgentOutputs:
         h_t = self.agent_hidden(packed_z, actions, space_mode=space_mode)
         return self.heads(h_t)
+
+
+def build_policy(
+    cfg: DictConfig,
+    *,
+    tokenizer: Tokenizer | None = None,
+    tokenizer_ckpt: str | None = None,
+    ckpt: str | None = None,
+) -> tuple[Tokenizer, PolicyModel, int, int]:
+    """Frozen tokenizer + PolicyModel; returns (tokenizer, model, n_spatial, packing_factor)."""
+    if tokenizer is None:
+        tokenizer = build_tokenizer(cfg.model.tokenizer, ckpt=tokenizer_ckpt)
+        for p in tokenizer.parameters():
+            p.requires_grad_(False)
+
+    n_latents = tokenizer.encoder.n_latents
+    latent_dim = tokenizer.encoder.bottleneck_proj.out_features
+    packing_factor = int(cfg.model.dynamics.get("packing_factor", 1))
+    model = PolicyModel(
+        cfg.model.dynamics,
+        n_latents=n_latents,
+        latent_dim=latent_dim,
+        heads_cfg=cfg.model,
+    )
+    if ckpt:
+        load_state(model, ckpt, prefix="model.")
+    return tokenizer, model, n_latents // packing_factor, packing_factor
+
+
+@dataclass
+class ImaginationRollout:
+    """Latent imagination rollout from a context window."""
+
+    latents: torch.Tensor  # (B, H, n_spatial, d_spatial)
+    hidden: torch.Tensor  # (B, H+1, D) agent states s_0..s_H
+    actions: torch.Tensor  # (B, H, A)
+    log_prob: torch.Tensor  # (B, H)
+
+
+def imagine_latent_rollout(
+    policy_model: PolicyModel,
+    dynamics: nn.Module,
+    packed_z_ctx: torch.Tensor,
+    actions_ctx: torch.Tensor,
+    policy: SquashedGaussianHead,
+    horizon: int,
+    flow_steps: int,
+    *,
+    ctx_len: int | None = None,
+) -> ImaginationRollout:
+    """Roll out H imagined steps in latent space with policy-sampled actions."""
+    ctx = packed_z_ctx.shape[1]
+    if ctx_len is not None and ctx_len < ctx:
+        z_sliding = packed_z_ctx[:, -ctx_len:]
+        a_sliding = actions_ctx[:, -ctx_len:]
+    else:
+        z_sliding = packed_z_ctx
+        a_sliding = actions_ctx
+        ctx_len = ctx
+
+    z_sliding = z_sliding.float()
+    a_sliding = a_sliding.float()
+    space_mode = policy_model.bc_space_mode
+
+    with torch.no_grad():
+        h_seq = policy_model.agent_hidden(z_sliding, a_sliding, space_mode=space_mode)
+    h = h_seq[:, -1]
+
+    imagined_latents: list[torch.Tensor] = []
+    imagined_actions: list[torch.Tensor] = []
+    imagined_log_prob: list[torch.Tensor] = []
+    imagined_hidden: list[torch.Tensor] = [h]
+
+    for _ in range(horizon):
+        if not torch.isfinite(h).all():
+            raise RuntimeError("non-finite agent hidden before policy sample in imagination rollout")
+        h_in = h.unsqueeze(1)
+        # Sampling under no_grad; PMPO re-evaluates log_prob on fixed actions in imagination_rl_policy_loss.
+        with torch.no_grad():
+            action_mtp, log_p_mtp, _, _ = policy.sample(h_in)
+        slot = POLICY_ENV_ACTION_SLOT
+        action = action_mtp[:, 0, slot]
+        log_p = log_p_mtp[:, 0, slot]
+        imagined_actions.append(action)
+        imagined_log_prob.append(log_p)
+
+        actions_step = torch.cat([a_sliding, action.unsqueeze(1)], dim=1)
+        with torch.no_grad():
+            z_next = sample_one_timestep_packed(
+                dynamics,
+                z_sliding,
+                actions_step,
+                flow_steps,
+            )
+        imagined_latents.append(z_next)
+        z_sliding = torch.cat([z_sliding, z_next.unsqueeze(1)], dim=1)
+        if z_sliding.shape[1] > ctx_len:
+            z_sliding = z_sliding[:, -ctx_len:]
+        a_sliding = torch.cat([a_sliding, action.unsqueeze(1)], dim=1)
+        if a_sliding.shape[1] > ctx_len:
+            a_sliding = a_sliding[:, -ctx_len:]
+        with torch.no_grad():
+            h = policy_model.agent_hidden(z_sliding, a_sliding, space_mode=space_mode)[:, -1]
+
+        imagined_hidden.append(h)
+
+    return ImaginationRollout(
+        latents=torch.stack(imagined_latents, dim=1),
+        hidden=torch.stack(imagined_hidden, dim=1),
+        actions=torch.stack(imagined_actions, dim=1),
+        log_prob=torch.stack(imagined_log_prob, dim=1),
+    )
 
 
 def _future_targets(x: torch.Tensor, horizon: int) -> torch.Tensor:
