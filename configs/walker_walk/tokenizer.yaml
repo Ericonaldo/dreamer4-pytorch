@@ -1,7 +1,9 @@
 stage: tokenizer
 
 data:
-  path: data/dmc_walker_walk
+  paths:
+    - data/dmc_walker_walk
+    - data/dmc_walker_walk_random500
   seq_len: 16
   obs_mode: image
   num_workers: 8
@@ -27,7 +29,7 @@ model:
 
 train:
   batch_size: 64
-  max_steps: 20_000
+  max_steps: 40_000
   checkpoint_every: 1000
   checkpoint_keep_last: 5
   val_every: 1000

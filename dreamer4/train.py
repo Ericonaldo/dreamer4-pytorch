@@ -161,8 +161,7 @@ def build_trainer(cfg: DictConfig, run_dir: Path, has_val: bool) -> L.Trainer:
     strategy = "auto"
     devices = cfg.train.devices
     if isinstance(devices, int) and devices > 1:
-        ddp_unused = cfg.stage in ("bc_dynamics", "rl")
-        strategy = "ddp_find_unused_parameters_true" if ddp_unused else "ddp"
+        strategy = "ddp"
 
     val_every = int(cfg.train.get("val_every", 0) or 0)
     step_val = has_val and val_every > 0

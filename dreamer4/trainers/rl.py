@@ -167,9 +167,11 @@ class RLModule(BaseModule):
     def _shared_step(self, batch, stage: str) -> torch.Tensor:
         rollout = self._imagine_from_batch(batch)
 
-        train_policy = (
-            stage == "train"
+        policy_weight = (
+            1.0
+            if stage == "train"
             and int(self.trainer.global_step) >= self.policy_warmup_steps
+            else 0.0
         )
 
         prefix = "val" if stage == "val" else self.stage
@@ -184,7 +186,7 @@ class RLModule(BaseModule):
             beta=self.beta,
             alpha=self.alpha,
             normalize_advantages=self.normalize_advantages,
-            train_policy=train_policy,
+            policy_weight=policy_weight,
         )
 
         for key, value in metrics.items():
