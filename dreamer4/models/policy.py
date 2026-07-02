@@ -76,15 +76,15 @@ class SquashedGaussianHead(nn.Module):
         action_dim: int,
         action_horizon: int,
         *,
-        log_std_min: float = -5.0,
-        log_std_max: float = 2.0,
+        min_std: float = 0.1,
+        max_std: float = 1.0,
         eps: float = 1e-6,
     ):
         super().__init__()
         self.action_dim = int(action_dim)
         self.action_horizon = int(action_horizon)
-        self.log_std_min = float(log_std_min)
-        self.log_std_max = float(log_std_max)
+        self.min_std = float(min_std)
+        self.max_std = float(max_std)
         self.eps = float(eps)
         out = self.action_horizon * self.action_dim * 2
         self.net = nn.Sequential(
@@ -101,7 +101,10 @@ class SquashedGaussianHead(nn.Module):
         # Linear may run in bf16 under mixed precision; distribution math stays fp32.
         raw = self.net(h_t).view(B, T, self.action_horizon, self.action_dim, 2).float()
         mean_u = raw[..., 0]
-        log_std = raw[..., 1].clamp(self.log_std_min, self.log_std_max)
+        # DreamerV3 bounded_normal: sigmoid soft-bound on std, not clamp on log_std.
+        raw_std = raw[..., 1]
+        std = (self.max_std - self.min_std) * torch.sigmoid(raw_std + 2.0) + self.min_std
+        log_std = torch.log(std)
         action = torch.tanh(mean_u)
         return action, mean_u, log_std
 
@@ -175,8 +178,8 @@ class AgentHeads(nn.Module):
         policy_hidden: int = 256,
         reward_hidden: int = 256,
         reward_layers: int = 1,
-        log_std_min: float = -5.0,
-        log_std_max: float = 2.0,
+        min_std: float = 0.1,
+        max_std: float = 1.0,
     ):
         super().__init__()
         self.action_horizon = int(action_horizon)
@@ -187,8 +190,8 @@ class AgentHeads(nn.Module):
             policy_hidden,
             self.action_dim,
             self.action_horizon,
-            log_std_min=log_std_min,
-            log_std_max=log_std_max,
+            min_std=min_std,
+            max_std=max_std,
         )
         self.reward_head = SymlogHead(
             d_model,
@@ -239,8 +242,8 @@ class PolicyModel(nn.Module):
             policy_hidden=int(heads.get("policy_hidden", 256)),
             reward_hidden=int(heads.get("reward_hidden", 256)),
             reward_layers=int(heads.get("reward_layers", 1)),
-            log_std_min=float(heads.get("log_std_min", -5.0)),
-            log_std_max=float(heads.get("log_std_max", 2.0)),
+            min_std=float(heads.get("min_std", 0.1)),
+            max_std=float(heads.get("max_std", 1.0)),
         )
         self._init_weights()
 
