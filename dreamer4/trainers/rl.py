@@ -28,7 +28,7 @@ class RLModule(BaseModule):
 
         imag = cfg.imagination
         self.seq_len = int(cfg.data.seq_len)
-        self.context_len_min = int(imag.get("context_len_min", 8))
+        self.context_len = int(imag.get("context_len", 8))
         self.horizon = int(imag.horizon)
         self.flow_steps = int(imag.flow_steps)
         self.gamma = float(imag.gamma)
@@ -94,18 +94,14 @@ class RLModule(BaseModule):
         image: torch.Tensor,
         action: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        """Random suffix context ending at the window tail; length uniform in [min_ctx, max_ctx]."""
+        """Fixed-length prefix context ``[:context_len]`` for imagination."""
         T = image.shape[1]
-        max_ctx = min(self.seq_len, T)
-        if max_ctx < 1:
-            raise ValueError(f"need at least 1 context frame, got T={T}, max_ctx={max_ctx}")
-        min_ctx = min(self.context_len_min, max_ctx)
-        if min_ctx >= max_ctx:
-            ctx_len = max_ctx
-        else:
-            ctx_len = int(torch.randint(min_ctx, max_ctx + 1, (1,)).item())
-        start = T - ctx_len
-        return image[:, start:], action[:, start:], ctx_len
+        ctx_len = min(self.context_len, self.seq_len, T)
+        if ctx_len < 1:
+            raise ValueError(
+                f"need at least 1 context frame, got T={T}, context_len={self.context_len}"
+            )
+        return image[:, :ctx_len], action[:, :ctx_len], ctx_len
 
     def _restore_policy_lr_after_warmup(self) -> None:
         if self.policy_warmup_steps <= 0:

@@ -383,7 +383,7 @@ def main() -> None:
 
     cfg = load_config(args.config, args.overrides)
     imag = cfg.get("imagination", {})
-    context_len = int(imag.get("context_len_min", 8))
+    context_len = int(imag.get("context_len", 8))
     horizon = int(imag.horizon)
     flow_steps = int(imag.flow_steps)
     seq_len = context_len + 2 * horizon

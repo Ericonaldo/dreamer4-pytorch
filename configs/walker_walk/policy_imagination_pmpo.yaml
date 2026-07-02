@@ -4,7 +4,7 @@ data:
   paths:
     - data/dmc_walker_walk
     - data/dmc_walker_walk_random500
-  seq_len: 16  # transition window; imagination context suffix in [context_len_min, seq_len]
+  seq_len: 16  # transition window (17 obs after align); imagination uses first context_len frames
   obs_mode: image
   num_workers: 8
   val_fraction: 0.05
@@ -56,7 +56,7 @@ model:
 imagination:
   horizon: 8
   flow_steps: 4
-  context_len_min: 8
+  context_len: 8
   gamma: 0.997
   lambda_: 0.95
   alpha: 0.5
