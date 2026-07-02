@@ -79,7 +79,7 @@ Per timestep t, build spatial token sequence (dim S = 3+S_sp+R+N = 16 by default
 h = mean(h_t, dim agent)  (B,T,D)
 AgentHeads(h):
   policy  → squashed Gaussian  (B,T,L,A)   MTP slot ℓ predicts a_{t+ℓ}, NLL
-  reward  → symexp twohot MLP  (B,T,L)     MTP slot ℓ predicts r_{t+ℓ}, twohot CE
+  reward  → SymlogHead MLP  (B,T,L)     MTP slot ℓ predicts symlog(r_{t+ℓ}), MSE in symlog space; decode with symexp
 ```
 
 **BC + dynamics** (`bc_dynamics` stage, `BCDynamicsModule` — config `bc_dynamics.yaml`):
@@ -96,7 +96,7 @@ Two forwards per step, different space attention masks (space_modes: [wm_dynamic
 
   2) BC (space_mode=wm_agent)
      τ = clean, d = finest; agent_t attends world (spatial/register/action/signal/step)
-     → h_t → AgentHeads → bc_loss (action NLL + reward twohot CE)
+     → h_t → AgentHeads → bc_loss (action NLL + reward symlog MSE)
 
   loss = flow_weight · loss_flow + bc_loss
 ```
@@ -218,9 +218,9 @@ Hold-out via `data.val_fraction` (default 5%). Metrics: `val/loss_mae`, `val/los
 
 | Script | What | Checkpoint |
 |--------|------|------------|
-| `dreamer4-eval` (`eval/policy.py`) | Online DMC policy rollout | `--bc-ckpt` |
+| `dreamer4-eval` (`eval/policy.py`) | Online DMC env rollout (BC or RL policy) | `--policy-ckpt` (bc_dynamics or rl Lightning ckpt with `model.*`) |
 | `eval/dynamics_rollout.py` | Open-loop dynamics on dataset actions | `--dynamics-ckpt` (uses `train.rollout_flow_steps`, default 4) |
-| `eval/imagination.py` | RL policy latent imagination | `--rl-ckpt` (uses `imagination.flow_steps`, default 4) |
+| `eval/imagination.py` | RL latent imagination panels / videos (not env eval) | `--rl-ckpt` (uses `imagination.flow_steps`, default 4) |
 
 Walker configs merge `policy_eval.yaml` under `dreamer4-eval`. See each CLI `--help` for panels, videos, episode filters, and `--gpus`.
 
@@ -229,7 +229,12 @@ uv run python -m eval.dynamics_rollout configs/walker_walk/bc_dynamics.yaml \
   --dynamics-ckpt logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt --split val
 
 uv run dreamer4-eval configs/walker_walk/bc_dynamics.yaml \
-  --bc-ckpt logs/walker_walk/bc_dynamics_10m/checkpoints/last.ckpt
+  --policy-ckpt logs/walker_walk/bc_dynamics/checkpoints/last.ckpt
+
+# Same CLI for RL: pass the rl checkpoint (loads model.* policy weights; value_head unused in env).
+uv run dreamer4-eval configs/walker_walk/policy_imagination_pmpo.yaml \
+  --policy-ckpt logs/walker_walk/rl_pmpo/checkpoints/last.ckpt \
+  --gpus 8 --episodes 64 --out logs/walker_walk/rl_pmpo/eval_env.json
 
 uv run python -m eval.imagination configs/walker_walk/policy_imagination_pmpo.yaml \
   --rl-ckpt logs/walker_walk/rl_pmpo/checkpoints/last.ckpt
@@ -254,7 +259,7 @@ dreamer4/
     transformer_blocks.py
     tokenizer.py
     dynamics.py
-    policy.py         # AgentHeads, PolicyModel, bc_loss, SymExpTwoHot readouts
+    policy.py         # AgentHeads, PolicyModel, bc_loss, SymlogHead (reward + RL value)
   trainers/           # Lightning modules per stage
     base.py
     tokenizer.py

@@ -1,5 +1,10 @@
-# Online policy eval defaults for dreamer4-eval.
-# Example: dreamer4-eval configs/walker_walk/bc_dynamics.yaml --bc-ckpt ...
+# Online env eval defaults for dreamer4-eval (BC stage 2 or RL stage 3).
+# Pass bc_dynamics or rl Lightning ckpt via --policy-ckpt (or policy_ckpt in stage yaml).
+# Example (BC):
+#   dreamer4-eval configs/walker_walk/bc_dynamics.yaml --policy-ckpt logs/.../bc_dynamics/.../last.ckpt
+# Example (RL):
+#   dreamer4-eval configs/walker_walk/policy_imagination_pmpo.yaml model.reward_layers=1 \\
+#     --policy-ckpt logs/.../rl_pmpo/.../last.ckpt
 eval:
   task: walker_walk
   image_size: 64

@@ -28,7 +28,7 @@ def load_policy_modules(
         cfg,
         tokenizer=tokenizer,
         tokenizer_ckpt=cfg.get("tokenizer_ckpt") if tokenizer is None else None,
-        ckpt=cfg.get("bc_ckpt") if model_state is None else None,
+        ckpt=cfg.get("policy_ckpt") if model_state is None else None,
     )
     if model_state is not None:
         model.load_state_dict(model_state, strict=False)

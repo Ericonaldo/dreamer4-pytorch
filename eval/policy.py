@@ -1,4 +1,25 @@
-"""DMC Walker Walk policy evaluation CLI."""
+"""Online DMC policy env evaluation (BC stage 2 or RL stage 3).
+
+Loads a Lightning checkpoint's ``model.*`` weights via ``DreamerAgent`` and rolls out
+in the real environment. The same CLI and code path works for:
+
+- **bc_dynamics** checkpoints (BC policy from stage 2)
+- **rl** checkpoints (fine-tuned policy from stage 3; ``value_head`` is not used here)
+
+Config key ``policy_ckpt`` points at a Lightning checkpoint with ``model.*`` weights
+(bc_dynamics warm-start, rl env eval, or fine-tuned rl policy).
+
+Examples::
+
+    # BC env eval
+    uv run dreamer4-eval configs/walker_walk/bc_dynamics.yaml \\
+      --policy-ckpt logs/walker_walk/bc_dynamics/checkpoints/last.ckpt --gpus 8
+
+    # RL env eval (same CLI; use rl config + rl checkpoint)
+    uv run dreamer4-eval configs/walker_walk/policy_imagination_pmpo.yaml \\
+      model.reward_layers=1 \\
+      --policy-ckpt logs/walker_walk/rl_pmpo/checkpoints/last.ckpt --gpus 8
+"""
 
 from __future__ import annotations
 
@@ -51,11 +72,28 @@ def run_policy_video(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate policy in DMC Walker Walk")
-    parser.add_argument("config", type=Path, help="BC or policy YAML config")
-    parser.add_argument("--bc-ckpt", type=Path, default=None, help="BC Lightning checkpoint")
+    parser = argparse.ArgumentParser(
+        description="Evaluate BC or RL policy in DMC (online env rollout)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  dreamer4-eval configs/walker_walk/bc_dynamics.yaml \\
+    --policy-ckpt logs/walker_walk/bc_dynamics/checkpoints/last.ckpt
+
+  dreamer4-eval configs/walker_walk/policy_imagination_pmpo.yaml model.reward_layers=1 \\
+    --policy-ckpt logs/walker_walk/rl_pmpo/checkpoints/last.ckpt --gpus 8 --episodes 64
+""",
+    )
+    parser.add_argument("config", type=Path, help="bc_dynamics or policy_imagination YAML")
+    parser.add_argument(
+        "--policy-ckpt",
+        type=Path,
+        default=None,
+        dest="policy_ckpt",
+        help="Lightning checkpoint with model.* weights (bc_dynamics or rl stage)",
+    )
     parser.add_argument("--episodes", type=int, default=None)
-    parser.add_argument("--gpus", type=int, default=None, help="Number of GPUs for BC eval")
+    parser.add_argument("--gpus", type=int, default=None, help="Number of GPUs for parallel env eval")
     parser.add_argument("--out", type=Path, default=None, help="Write metrics JSON here")
     parser.add_argument("--video-out", type=Path, default=None, help="Record one episode mp4 here")
     parser.add_argument("--video-fps", type=int, default=20, help="FPS for --video-out")
@@ -68,10 +106,10 @@ def main() -> None:
         "--action-horizon",
         type=int,
         default=None,
-        help="Open-loop MTP steps per replan (1=closed-loop from current obs; default eval.action_horizon)",
+        help="Open-loop env steps per model forward (1=closed-loop from current obs; default eval.action_horizon)",
     )
     parser.add_argument("--task", type=str, default=None, help="DMC task name, e.g. walker_walk")
-    parser.add_argument("overrides", nargs="*", help="Config overrides")
+    parser.add_argument("overrides", nargs="*", help="Config overrides (must follow all flags)")
     args = parser.parse_args()
 
     eval_defaults_path = args.config.parent / "policy_eval.yaml"
@@ -79,8 +117,8 @@ def main() -> None:
         cfg = OmegaConf.merge(OmegaConf.load(eval_defaults_path), load_config(args.config, args.overrides))
     else:
         cfg = load_config(args.config, args.overrides)
-    if args.bc_ckpt is not None:
-        cfg.bc_ckpt = str(args.bc_ckpt)
+    if args.policy_ckpt is not None:
+        cfg.policy_ckpt = str(args.policy_ckpt)
     if args.task is not None:
         cfg.eval.task = args.task
     if args.action_horizon is not None:
@@ -89,12 +127,16 @@ def main() -> None:
     eval_cfg = cfg.get("eval", {})
     episodes = int(args.episodes or eval_cfg.get("episodes", 10))
     task = str(eval_cfg.get("task", "walker_walk"))
+    stage = str(cfg.get("stage", "bc_dynamics"))
+    ckpt_path = cfg.get("policy_ckpt")
 
-    metrics: dict = {"policy": "bc", "task": task}
+    metrics: dict = {"stage": stage, "task": task}
+    if ckpt_path:
+        metrics["policy_ckpt"] = ckpt_path
 
     if args.video_out is not None:
-        if not cfg.get("bc_ckpt"):
-            raise ValueError("BC video requires bc_ckpt in config or --bc-ckpt")
+        if not ckpt_path:
+            raise ValueError("Policy video requires policy_ckpt in config or --policy-ckpt")
         gpu_id = 0 if torch.cuda.is_available() else None
         if args.gpus is not None:
             gpu_id = 0
@@ -108,8 +150,8 @@ def main() -> None:
             )
         )
 
-    if not cfg.get("bc_ckpt"):
-        raise ValueError("BC eval requires bc_ckpt in config or --bc-ckpt")
+    if not ckpt_path:
+        raise ValueError("Env eval requires policy_ckpt in config or --policy-ckpt")
     gpu_ids = parse_eval_gpu_ids(eval_cfg.get("gpu_ids", "all"))
     if args.gpus is not None:
         gpu_ids = list(range(args.gpus))
