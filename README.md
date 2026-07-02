@@ -255,7 +255,7 @@ dreamer4/
     tokenizer.py
     dynamics.py
     policy.py         # AgentHeads, PolicyModel, bc_loss, SymExpTwoHot readouts
-  modules/            # Lightning modules per stage
+  trainers/           # Lightning modules per stage
     base.py
     tokenizer.py
     bc_dynamics.py
