@@ -47,13 +47,13 @@ model:
   action_horizon: 8
   policy_hidden: 256
   reward_hidden: 256
-  reward_layers: 1
+  reward_layers: 2
   min_std: 0.1
   max_std: 1.0
 
 train:
   batch_size: 64
-  max_steps: 75_000
+  max_steps: 100_000
   checkpoint_every: 2000
   checkpoint_keep_last: 5
   val_every: 1000

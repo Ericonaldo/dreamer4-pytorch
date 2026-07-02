@@ -415,7 +415,11 @@ def run_policy_env_eval(
     tokenizer_state: dict[str, torch.Tensor] | None = None,
     gpu_ids: list[int] | None = None,
 ) -> dict[str, float]:
-    """Online BC policy eval; multi-GPU via spawn when ``len(gpu_ids) > 1``."""
+    """Online BC policy eval; multi-GPU via spawn when ``len(gpu_ids) > 1``.
+
+    Works for bc_dynamics and rl checkpoints: both provide ``model.*`` policy weights
+    via ``cfg.policy_ckpt`` (see ``dreamer4-eval --policy-ckpt``).
+    """
     episodes = int(num_episodes or cfg.get("eval", {}).get("episodes", 10))
     action_horizon = resolve_eval_action_horizon(cfg)
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
@@ -483,7 +487,7 @@ def run_policy_episode(
         )
         policy = DreamerAgent(cfg, device, model=model, tokenizer=tokenizer)
     else:
-        # Offline CLI eval: DreamerAgent loads from cfg.bc_ckpt / cfg.tokenizer_ckpt.
+        # Offline CLI eval: DreamerAgent loads PolicyModel from cfg.policy_ckpt.
         policy = DreamerAgent(cfg, device)
 
     policy.reset()

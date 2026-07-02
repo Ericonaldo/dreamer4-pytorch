@@ -10,9 +10,10 @@ data:
   val_fraction: 0.05
   val_seed: 0
 
-# Warm-start from joint BC+dynamics checkpoint (same arch as bc_dynamics.yaml).
+# Warm-start RL training from bc_dynamics (architecture must match policy_ckpt path).
+# Offline env eval: dreamer4-eval --policy-ckpt with the rl checkpoint.
 tokenizer_ckpt: logs/walker_walk/tokenizer/checkpoints/last.ckpt
-bc_ckpt: logs/walker_walk/bc_dynamics/checkpoints/last.ckpt
+policy_ckpt: logs/walker_walk/bc_dynamics/checkpoints/last.ckpt
 
 model:
   tokenizer:
@@ -48,8 +49,8 @@ model:
   policy_hidden: 256
   reward_hidden: 256
   value_hidden: 256
-  reward_layers: 1
-  value_layers: 1
+  reward_layers: 2
+  value_layers: 2
   min_std: 0.1
   max_std: 1.0
 
@@ -57,10 +58,10 @@ imagination:
   horizon: 8
   flow_steps: 4
   context_len: 8
-  gamma: 0.997
+  gamma: 0.99
   lambda_: 0.95
   alpha: 0.5
-  beta: 0.3
+  beta: 0.05
   policy_warmup_steps: 500
   policy_lr: 3.0e-5
 

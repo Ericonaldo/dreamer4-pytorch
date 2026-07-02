@@ -41,7 +41,7 @@ class RLModule(BaseModule):
         self.tokenizer, self.model, self.n_spatial, self.packing_factor = build_policy(
             cfg,
             tokenizer_ckpt=cfg.get("tokenizer_ckpt"),
-            ckpt=cfg.get("bc_ckpt"),
+            ckpt=cfg.get("policy_ckpt"),
         )
 
         for p in self.model.dynamics.parameters():

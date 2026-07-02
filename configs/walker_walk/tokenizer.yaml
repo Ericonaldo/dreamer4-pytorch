@@ -29,7 +29,7 @@ model:
 
 train:
   batch_size: 64
-  max_steps: 40_000
+  max_steps: 60_000
   checkpoint_every: 1000
   checkpoint_keep_last: 5
   val_every: 1000
