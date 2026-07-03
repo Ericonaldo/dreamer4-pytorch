@@ -273,7 +273,6 @@ dreamer4/
 eval/                 # Standalone eval scripts + viz
   common.py
   data_stats.py       # Episode return / band helpers for eval scripts
-  smoke_test.py       # Checkpoint compatibility baseline
   dynamics_rollout.py
   tokenizer.py
   imagination.py      # RL policy latent rollout videos (--rl-ckpt)
